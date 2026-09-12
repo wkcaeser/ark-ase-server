@@ -8,6 +8,8 @@
 - 停机时自动**优雅保存世界**（先发 SIGINT，超时才强杀），避免回档
 - 内置存档备份 / 恢复 / 配置渲染等运维子命令
 
+> 项目地址：<https://github.com/wkcaeser/ark-ase-server> ｜ 基于 [MIT 许可证](LICENSE) 开源
+
 ---
 
 ## 目录
@@ -28,7 +30,17 @@
 
 ## 一、快速开始
 
-### 1. 环境要求
+### 1. 获取代码
+
+```bash
+git clone https://github.com/wkcaeser/ark-ase-server.git
+cd ark-ase-server
+```
+
+> 没有 Git 环境的话，也可以直接下载
+> [ZIP 压缩包](https://github.com/wkcaeser/ark-ase-server/archive/refs/heads/main.zip) 解压使用。
+
+### 2. 环境要求
 
 | 项目 | 要求 |
 | --- | --- |
@@ -37,11 +49,11 @@
 | 内存 | 最低 4 GB，**建议 8 GB 起**；带大型模组或 30 人以上建议 16 GB |
 | 磁盘 | 40 GB 起（服务端约 10 GB + 野人模组 3.1 GB + 存档 + 备份 + 模组副本） |
 | CPU | 2 核起，方舟吃**单核性能**，主频越高越流畅 |
-| 网络 | 需要能访问 Steam（国内公网环境建议给 Docker 配代理，见 [FAQ 2](#9-steamcmd-下载慢或失败)） |
+| 网络 | 需要能访问 Steam（国内公网环境建议给 Docker 配代理，见 [FAQ 2](#2-steamcmd-下载慢或失败)） |
 
 > 家庭宽带 / 云服务器都可以。云服务器记得在**安全组**里放行下方端口。
 
-### 2. 三步启动
+### 3. 三步启动
 
 ```bash
 # 1) 进入项目目录，生成配置文件
@@ -77,7 +89,7 @@ docker compose logs -f
 
 看到 `Server has completed startup` / `Server started` 之类的日志，就说明起来了。
 
-### 3. 玩家如何进入游戏
+### 4. 玩家如何进入游戏
 
 1. 打开《方舟：生存进化》，进入「加入 ARK」→ 顶部搜索框输入你的**服务器名称**
    （服务器要在 Steam 服务器列表里能被搜到，需要 `QUERY_PORT` 对外可达）
@@ -119,7 +131,7 @@ ark-ase-server/
     └── backup/                                   # 存档备份 / 配置历史备份
 ```
 
-> **重要**：`data/server` 里是全部游戏进度，请定期备份（见 [备份与恢复](#7-备份与恢复)）。
+> **重要**：`data/server` 里是全部游戏进度，请定期备份（见 [备份与恢复](#备份与恢复)）。
 > 删除容器不会丢数据，但删除 `data/` 就等于删号。
 
 ---
