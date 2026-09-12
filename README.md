@@ -64,6 +64,8 @@ cp .env.example .env
 #    SERVER_ADMIN_PASSWORD=换成你自己的管理员密码
 #    SESSION_NAME=你的服务器名字
 #    MAP=TheIsland   # 想换地图改这里
+#    ⚠ Windows/WSL 用户再加一项（否则服务端装不上，见 FAQ 13）：
+#    DATA_DIR=/home/<你的用户名>/ark-data
 vim .env
 
 # 3) 构建并启动
@@ -415,7 +417,10 @@ docker compose logs --tail=500 | grep -iE 'error|mod|started'
 
 # 进容器排查（进程 / 端口 / 文件）
 docker compose exec ark bash
-# 容器里可以执行：ark-server mods / ark-server render / ark-server backup
+# 容器里可以执行：ark-server mods / ark-server doctor / ark-server render / ark-server backup
+
+# 环境自检：挂载/文件系统/权限/属主/磁盘/代理/SteamCMD 状态（装不上服务端时先跑这个）
+docker compose run --rm ark doctor
 
 # 手动触发一次服务端 + 模组更新（不启动服务器）
 docker compose run --rm ark install
@@ -490,7 +495,24 @@ docker compose logs -f       # 确认识别到了新的倍率与模组
 
 ### 2. SteamCMD 下载慢或失败
 
-Steam 在国内公网经常抽风，给 Docker 配代理是最有效的办法。示例（`/etc/docker/daemon.json`）：
+Steam 在国内公网经常抽风，给 Docker 配代理是最有效的办法。
+
+**方式一（本项目内置，推荐）：填 `.env` 里的代理变量**
+
+```env
+HTTP_PROXY=http://host.docker.internal:7890
+HTTPS_PROXY=http://host.docker.internal:7890
+NO_PROXY=localhost,127.0.0.1
+```
+
+改完 `docker compose up -d` 即可，**不用重启 Docker**。
+
+> ⚠ 两个常见的坑：
+> 1. 代理跑在宿主机（Windows/WSL）上时，容器里的 `127.0.0.1` 指的是**容器自己**，
+>    写了也连不上，必须用 `host.docker.internal`（或宿主机内网 IP）。
+> 2. 代理软件要打开「允许局域网连接 / Allow LAN」，否则宿主机之外连不进来。
+
+**方式二：给整个 Docker 守护进程配代理**（只适用于 **WSL 里原生安装的 docker**）
 
 ```json
 {
@@ -501,8 +523,14 @@ Steam 在国内公网经常抽风，给 Docker 配代理是最有效的办法。
   }
 }
 ```
-改完执行 `sudo systemctl restart docker`（注意 `127.0.0.1` 要换成宿主机在容器网络里可达的地址，
-例如 `http://host.docker.internal:7890` 或宿主机的内网 IP）。
+
+写进 `/etc/docker/daemon.json` 后执行 `sudo systemctl daemon-reload && sudo systemctl restart docker`。
+
+> 为什么这里能用 `127.0.0.1`？因为 WSL 原生 docker 的守护进程就跑在 WSL 里，
+> 和你的代理是同一台机器。
+> **Docker Desktop 用户不能这么写**——它的守护进程跑在一个独立的虚拟机里，
+> 那里的 `127.0.0.1` 指向虚拟机自己。请用 Settings → Resources → Proxies，
+> 详见 [FAQ 14](#14-构建时报-eof拉不到-debian12-slim-基础镜像)。
 
 临时排障也可以进容器手动重试：
 
@@ -634,6 +662,193 @@ file entrypoint.sh               # 期望看到 "ASCII text"，若带 "CRLF" 则
 
 > 顺带提一句：Windows 上编辑脚本建议把编辑器设置为「LF」换行符，
 > 或把 Git 全局配置改成 `git config --global core.autocrlf input`。
+
+### 13. 日志刷 `ERROR! Failed to install app '376030' (Missing file permissions)`
+
+**Windows + WSL 用户装不上服务端的头号原因**，和代码、和网络都无关，是**数据目录所在的文件系统**。
+
+Windows 的 C 盘（`/mnt/c/...`）被 Docker Desktop 映射进容器时走 9p/DrvFs，这种挂载
+**不保留 Linux 权限语义**，`chmod` 近似空操作。SteamCMD 要创建并设置权限的文件因此被拒：
+
+- 日志停在 `Waiting for user info... OK` 之后**立刻**报 `Missing file permissions`
+  （注意：**连下载进度都不会出现**，说明不是下载中断，是安装一开始就被拒）
+- 反复重试同样失败，最后 `[错误] 服务端安装失败`，容器退出又被 `restart` 拉起，无限循环
+- 有时报 `Missing configuration`；也可能撑到一半变成 `No Connection` / 超时
+  ——那是 Steam 网络抖动，属于[另一个问题](#2-steamcmd-下载慢或失败)
+
+判据：`data/server/steamapps` 是空的、`data/server/ShooterGame/Binaries` 不存在，
+说明一个字节都没装上。
+
+**修复：把数据放到 WSL 自己的文件系统（ext4）里**
+
+```bash
+# 1) 在 WSL 里查自己的家目录，例如 /home/wk_home
+echo $HOME
+
+# 2) 编辑 .env，改掉 DATA_DIR
+#    DATA_DIR=/home/wk_home/ark-data
+
+# 3) 迁移旧数据并重建容器
+docker compose down
+mkdir -p "$HOME/ark-data"
+mv ./data/* "$HOME/ark-data/" 2>/dev/null || true
+docker compose up -d --build
+```
+
+**容器现在会自己检测这件事**：启动时对数据目录做一次「文件系统类型 + 权限实测」，
+不通过就直接打印修复指引并退出，省得你对着 SteamCMD 的报错猜。
+确实要用 Windows 目录时，在 `.env` 里设 `ALLOW_WINDOWS_DATA_DIR=true` 强制放行（不推荐）。
+
+Linux 服务器 / macOS 不存在这个问题，保持 `DATA_DIR=./data` 即可。
+
+> ⚠ **别把这句话当成万能解释。** 容器启动时会自检数据目录：**自检通过了，就说明
+> 这条不是你的病因**，请直接看 [FAQ 15](#15-自检通过容器也能正常写文件但-steamcmd-仍报-missing-file-permissions)。
+> `Missing file permissions` 是 SteamCMD 最爱乱报的一句话，还有一个成因是**网络**。
+
+### 14. 构建时报 EOF，拉不到 debian:12-slim 基础镜像
+
+典型报错：
+
+```
+=> ERROR [internal] load metadata for docker.io/library/debian:12-slim
+failed to solve: failed to do request:
+  Head "https://registry-1.docker.io/v2/library/debian/manifests/12-slim": EOF
+```
+
+**先记住一件事：这跟 `.env` 里的代理没有半点关系，删掉代理也修不好。**
+`env_file` 只注入容器运行时的环境变量，**不参与** `docker build`。
+
+关键是分清两层，它们的出口完全不同：
+
+| 阶段 | 谁发起的请求 | 该在哪里配代理 / 加速 |
+| --- | --- | --- |
+| **构建**：拉 `debian:12-slim`、`apt-get`、下载 SteamCMD | Docker 引擎 + BuildKit | 引擎级：Docker Desktop 的 Proxies / Docker Engine JSON |
+| **运行**：SteamCMD 下服务端与模组、服务端联网 | 容器里的进程 | `.env` 的 `HTTP_PROXY` / `HTTPS_PROXY` |
+
+你现在卡在**构建层**，所以要在引擎上动手。
+
+**第 1 步：看看引擎当前的真实配置**
+
+```powershell
+# Windows PowerShell
+docker info | Select-String -Pattern "Proxy|Registry Mirrors"
+
+# WSL / Linux
+docker info | grep -Ei "proxy|registry mirrors"
+```
+
+**第 2 步：按结果对症处理**
+
+**情况 A：`HTTP Proxy:` 有值，且是 `http://127.0.0.1:7890`** —— 大概率就是它。
+
+Docker Desktop 的引擎跑在一个独立虚拟机里，那里的 `127.0.0.1` 指向虚拟机自己，
+不是你的 Windows 宿主机，连接会被立刻丢弃（表现正是 `EOF`）。
+
+- 打开 Docker Desktop → **Settings → Resources → Proxies**
+- 把地址改成 `http://host.docker.internal:7890`（端口换成你自己的），
+  或先**关掉 "Use system proxy"** 验证是不是它的问题
+- 顺手确认代理软件开了「允许局域网连接 / Allow LAN」
+- Apply & Restart 后回到第 1 步复查
+
+**情况 B：`Registry Mirrors:` 是空的** —— 国内直连 Docker Hub 本来就时通时断。
+
+Docker Desktop → **Settings → Docker Engine**，在 JSON 里补上（保留原有字段）：
+
+```json
+{
+  "registry-mirrors": [
+    "https://docker.xuanyuan.me",
+    "https://docker.1ms.run",
+    "https://docker.m.daocloud.io"
+  ]
+}
+```
+
+Apply & Restart。多填几个是为了容灾——加速器都是社区服务，会失效、会变动，
+某个不通就换列表里的下一个。
+
+**第 3 步：验证**
+
+```powershell
+docker pull debian:12-slim            # 能拉下来就说明通了
+docker compose up -d --build
+```
+
+**如果构建期也要走代理**（例如 `apt-get` 或下载 SteamCMD 被卡住）：
+
+代理要传给**构建进程**，而不是写进 `.env`。注意 `RUN` 步骤跑在 Docker 虚拟机的容器里，
+所以同样要用 `host.docker.internal`：
+
+```bash
+# bash（Windows Git Bash / WSL / Linux）
+HTTP_PROXY=http://host.docker.internal:7890 \
+HTTPS_PROXY=http://host.docker.internal:7890 \
+docker compose build
+```
+
+```powershell
+# Windows PowerShell
+$env:HTTP_PROXY="http://host.docker.internal:7890"
+$env:HTTPS_PROXY="http://host.docker.internal:7890"
+docker compose build
+```
+
+> 构建成功后这两个变量就可以关掉，容器运行时用的是 `.env` 里那一组，互不干扰。
+
+### 15. 自检通过、容器也能正常写文件，但 SteamCMD 仍报 `Missing file permissions`
+
+这是最容易把人带偏的一种情况。先说结论：**这句话有两个完全不同的成因，别默认是"权限"。**
+
+| 成因 | 判据 | 怎么办 |
+| --- | --- | --- |
+| ① 数据目录在 Windows/网络挂载上，`chmod` 不生效 | 启动日志里**没有**「数据目录自检通过」，或自检直接报错退出 | [FAQ 13](#13-日志刷-error-failed-to-install-app-376030-missing-file-permissions) |
+| ② **与 Steam 的连接不稳**（国内公网主因） | 启动日志里**有**「数据目录自检通过（/ark，文件系统 ext2/ext3）」 | 给容器配代理，[FAQ 2](#2-steamcmd-下载慢或失败) |
+
+**怎么一眼认出是 ②**
+
+- 启动日志里有 `[信息] 数据目录自检通过（/ark，文件系统 ext2/ext3）`（`ext2/ext3` 就是 ext4 的
+  探测结果）。这是前提——说明目录真的可写，容器也确实成功往 `/ark` 写了
+  `GameUserSettings.ini` / `Game.ini`。
+- SteamCMD 自己的日志里，**报错文案会在 `Missing file permissions` 和 `Missing configuration`
+  之间来回变**。同一套环境、每次报的不一样 → 不是权限这种确定性问题，是连接在抖。
+- `Waiting for user info...` 之后要等十几秒甚至几十秒才 `OK`（正常是 1~3 秒），
+  同一时段还会夹杂 `No Connection` / `Retrying...`。
+- **`/ark/steamapps` 始终没被创建**，也不存在 `content_log.txt` ——
+  说明安装连"开始下载"都没走到，是被 Steam 侧卡住的，而不是被文件系统拒绝。
+
+上面任意一条成立，就不要再折腾目录权限了。
+
+**修复一：给容器配代理（最有效）**
+
+`.env`：
+
+```env
+HTTP_PROXY=http://host.docker.internal:7890
+HTTPS_PROXY=http://host.docker.internal:7890
+```
+
+端口换成你自己代理的端口，确认代理软件开了「允许局域网连接 / Allow LAN」，然后
+`docker compose up -d`。⚠ 容器里的 `127.0.0.1` 指容器自己，一定写 `host.docker.internal`。
+
+**修复二：把 SteamCMD 整个重建一份**
+
+从 Windows 目录搬过来的 SteamCMD 可能残留了状态不一致的文件：
+
+```bash
+docker compose down
+mv "$HOME/ark-data/steamcmd" "$HOME/ark-data/steamcmd.bak"
+docker compose up -d --build      # 容器会重新下载一份干净的 SteamCMD
+```
+
+**先跑自检，别再猜**
+
+```bash
+docker compose run --rm ark doctor
+```
+
+一次性打印身份、挂载点、文件系统类型、属主与权限、磁盘/inode 余量、代理变量、
+`steamapps` 是否创建、SteamCMD 日志清单。另外安装失败时，`docker compose logs` 里
+会**自动附带一版精简诊断**，可直接复制反馈。
 
 ---
 

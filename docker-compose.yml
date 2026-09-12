@@ -12,6 +12,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # ⚠ 构建镜像这一层走的是「Docker 引擎自己的网络出口」，和下面 environment 里的
+      #   代理无关：拉 debian:12-slim、apt-get、下载 SteamCMD 都是引擎/BuildKit 发起的。
+      #   若构建时报 registry-1.docker.io ... EOF，要去配镜像加速器或 Docker Desktop 代理，
+      #   见 README FAQ 14。
+      #   确实需要构建期也走代理时，在执行的 shell 里带上再构建（注意要用
+      #   host.docker.internal，因为 RUN 步骤跑在 Docker 虚拟机的容器里）：
+      #     bash:  HTTP_PROXY=http://host.docker.internal:7890 docker compose build
+      #     PS:    $env:HTTP_PROXY="http://host.docker.internal:7890"; docker compose build
     image: ark-ase-server:latest
     container_name: ark-server
     # 服务器崩溃或宿主机重启后自动拉起
@@ -22,6 +30,14 @@ services:
       - .env
     environment:
       TZ: Asia/Shanghai
+      # 代理：国内直连 Steam 不稳定时，在 .env 里填 HTTP_PROXY / HTTPS_PROXY / NO_PROXY。
+      # ⚠ 这一组只作用于「容器运行时」——SteamCMD 下载服务端与模组、服务端本身联网。
+      #   它对 docker build 完全无效（env_file 不参与构建），构建报错请看 README FAQ 14。
+      # ⚠ 代理跑在宿主机（Windows/WSL）上时，容器里的 127.0.0.1 指的是容器自己，
+      #   必须写成 host.docker.internal，例如 http://host.docker.internal:7890
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
     ports:
       # ⚠ 服务器对外宣告的端口就是它自己监听的端口，所以这里内外必须一致（${X}:${X}）。
       #   改 PORT 时请同步把 RAW_PORT 设成 PORT+1（原版原始套接字固定为游戏端口+1）。
@@ -30,12 +46,17 @@ services:
       - "${QUERY_PORT:-27015}:${QUERY_PORT:-27015}/udp" # Steam 查询端口（服务器列表发现）
       - "${RCON_PORT:-32330}:${RCON_PORT:-32330}/tcp"   # RCON 管理端口（仅建议内网/白名单开放）
     volumes:
+      # 数据目录由 .env 里的 DATA_DIR 决定（默认 ./data）。
+      # ⚠ Windows + WSL：不要用 /mnt/c 下的路径，9p/DrvFs 不保留 Linux 权限语义，
+      #   会让 SteamCMD 报 "Missing file permissions" 而装不上服务端。
+      #   请改到 WSL 原生路径，例如 DATA_DIR=/home/你的用户名/ark-data
+      #
       # 服务端本体 + 存档 + 模组（约 10~20 GB，务必持久化）
-      - ./data/server:/ark
+      - ${DATA_DIR:-./data}/server:/ark
       # SteamCMD 与创意工坊缓存（避免每次重建容器都重下模组）
-      - ./data/steamcmd:/opt/steamcmd
+      - ${DATA_DIR:-./data}/steamcmd:/opt/steamcmd
       # 备份
-      - ./data/backup:/backup
+      - ${DATA_DIR:-./data}/backup:/backup
       # 自定义配置覆盖目录（只读挂载）
       - ./config:/etc/ark/config:ro
     ulimits:
@@ -77,8 +98,8 @@ services:
 #      - "27016:27016/udp"
 #      - "32331:32331/tcp"
 #    volumes:
-#      - ./data/server:/ark
-#      - ./data/steamcmd:/opt/steamcmd
-#      - ./data/backup:/backup
+#      - ${DATA_DIR:-./data}/server:/ark
+#      - ${DATA_DIR:-./data}/steamcmd:/opt/steamcmd
+#      - ${DATA_DIR:-./data}/backup:/backup
 #      - ./config:/etc/ark/config:ro
 # =============================================================================

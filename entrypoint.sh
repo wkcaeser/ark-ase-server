@@ -10,6 +10,7 @@
 #    backup   备份存档（ShooterGame/Saved）到 /backup
 #    restore  从备份恢复，用法：restore <备份文件名>
 #    mods     打印最终生效的模组列表
+#    doctor   环境自检：挂载 / 权限 / 磁盘 / 代理 / SteamCMD 状态（排障用）
 #    version  打印当前服务端 buildid
 #    shell    进入容器 shell
 # =============================================================================
@@ -97,6 +98,7 @@ CONFIG_BACKUP="${CONFIG_BACKUP:-true}"              # 重写前备份旧配置�
 BACKUP_KEEP="${BACKUP_KEEP:-10}"                    # backup 子命令保留的备份份数
 STOP_TIMEOUT="${STOP_TIMEOUT:-90}"                  # 停机时等待世界保存的秒数
 SKIP_INSTALL_ON_START="${SKIP_INSTALL_ON_START:-false}"  # true=启动时完全不碰 SteamCMD
+ALLOW_WINDOWS_DATA_DIR="${ALLOW_WINDOWS_DATA_DIR:-false}" # true=数据目录在 Windows/网络挂载上也照常启动（不推荐）
 
 # --------------------------- 服务器身份 -------------------------------------
 SESSION_NAME="${SESSION_NAME:-方舟生存进化-专用服务器}"
@@ -188,6 +190,66 @@ ensure_dirs() {
   for d in "$ARK_SERVER_DIR" "$CONFIG_DIR" "$MODS_DIR" "$BACKUP_DIR" "$USER_CONFIG_DIR"; do
     mkdir -p "$d" 2>/dev/null || warn "无法创建目录 ${d}（权限不足？请检查挂载目录属主）"
   done
+  check_data_dirs
+}
+
+# 数据目录自检：Windows 挂载（Docker Desktop 走 9p/DrvFs）不保留 Linux 权限语义，
+# chmod 近似空操作，SteamCMD 会直接报 "Missing file permissions" 而一字节都装不上，
+# 且因为 restart 策略会无限重启刷屏。这里主动、尽早把原因讲清楚。
+check_data_dirs() {
+  local fstype="" bad="false" why=""
+
+  fstype="$(stat -f -c %T "$ARK_SERVER_DIR" 2>/dev/null || true)"
+  case "$fstype" in
+    9p|drvfs|vboxsf|cifs|smb2|nfs|msdos|ntfs|fuseblk)
+      bad="true"; why="所在文件系统为 ${fstype}（Windows/网络挂载），不保留 Linux 权限" ;;
+  esac
+
+  # 功能自检：写入 -> chmod 600 -> 读回权限；权限没生效时会露馅
+  local probe="${ARK_SERVER_DIR}/.perm_probe.$$"
+  if printf 'x' > "$probe" 2>/dev/null; then
+    chmod 600 "$probe" 2>/dev/null || true
+    local mode; mode="$(stat -c %a "$probe" 2>/dev/null || true)"
+    rm -f "$probe" 2>/dev/null || true
+    if [ "$mode" != "600" ]; then
+      bad="true"; why="${why:+${why}；}chmod 600 读回为 ${mode:-未知}，权限未生效"
+    fi
+  else
+    bad="true"; why="${why:+${why}；}无法在 ${ARK_SERVER_DIR} 写入文件"
+  fi
+
+  if [ "$bad" = "false" ]; then
+    log "数据目录自检通过（${ARK_SERVER_DIR}，文件系统 ${fstype:-未知}）"
+    return 0
+  fi
+
+  if is_true "$ALLOW_WINDOWS_DATA_DIR"; then
+    warn "数据目录自检未通过：${why}。因 ALLOW_WINDOWS_DATA_DIR=true 继续启动；若 SteamCMD 报 Missing file permissions，请把 DATA_DIR 改到 WSL 原生路径。"
+    return 0
+  fi
+
+  err "数据目录不可用：${why}"
+  cat >&2 <<TIPS
+
+  ────────────────────────────────────────────────────────────────────────
+  这会导致 SteamCMD 报：
+      ERROR! Failed to install app '${APP_ID}' (Missing file permissions)
+  服务端永远装不上，容器还会被 restart 策略反复拉起。
+
+  修复：把数据放到 WSL 自己的文件系统（ext4），不要用 /mnt/c 下的路径。
+    1) 在 WSL 里执行：echo \$HOME          # 例如 /home/wk_home
+    2) 编辑 .env：
+           DATA_DIR=/home/<你的用户名>/ark-data
+    3) 重建容器：
+           docker compose down
+           mv ./data/* "\$HOME/ark-data/" 2>/dev/null || true
+           docker compose up -d --build
+
+  确实想用当前目录（不推荐）：在 .env 里设 ALLOW_WINDOWS_DATA_DIR=true
+  ────────────────────────────────────────────────────────────────────────
+
+TIPS
+  exit 1
 }
 
 # SteamCMD 自检（若挂载卷里没有则自动补装）
@@ -255,6 +317,33 @@ steamcmd_run() {
   return 1
 }
 
+# -----------------------------------------------------------------------------
+# 排障：把「判断权限问题还是网络问题」需要的东西一次性打全
+#   SteamCMD 的 "Missing file permissions" 是个**会骗人**的报错，它有两个成因：
+#     A. 数据目录在 Windows/网络挂载上，chmod 不生效（check_data_dirs 会拦住）
+#     B. 与 Steam 的连接不稳（国内公网极常见），SteamCMD 却仍报这句
+#   区分办法就在下面的输出里：
+#     - /ark/steamapps 是否被创建：没创建 = 安装根本没走到下载阶段
+#     - SteamCMD 自己的 console_log.txt 最后几行
+# -----------------------------------------------------------------------------
+dump_install_diag() {
+  warn "安装失败，以下为排障信息（可直接复制反馈）："
+  err  "  id            : $(id 2>/dev/null || echo 未知)"
+  err  "  HOME          : ${HOME:-未设置}"
+  err  "  ${ARK_SERVER_DIR} 文件系统 : $(stat -f -c %T "$ARK_SERVER_DIR" 2>/dev/null || echo 未知)  可写=$([ -w "$ARK_SERVER_DIR" ] && echo 是 || echo 否)"
+  err  "  ${ARK_SERVER_DIR} 属主/权限 : $(ls -ld "$ARK_SERVER_DIR" 2>/dev/null || echo 未知)"
+  err  "  ${STEAMCMD_DIR} 属主/权限 : $(ls -ld "$STEAMCMD_DIR" 2>/dev/null || echo 未知)"
+  err  "  磁盘剩余      : $(df -h "$ARK_SERVER_DIR" 2>/dev/null | tail -n 1 || echo 未知)"
+  err  "  steamapps     : $([ -d "${ARK_SERVER_DIR}/steamapps" ] && echo '已创建' || echo '未创建（安装没走到下载阶段，多半是 Steam 侧而非权限）')"
+  err  "  代理          : HTTP_PROXY=${HTTP_PROXY:-（未设置）} HTTPS_PROXY=${HTTPS_PROXY:-（未设置）}"
+  local clog="${STEAMCMD_DIR}/linux32/logs/console_log.txt"
+  if [ -f "$clog" ]; then
+    err "  最近 SteamCMD 输出："
+    while IFS= read -r line; do err "    ${line}"; done < <(tail -n 12 "$clog" 2>/dev/null || true)
+  fi
+  err  "  需要完整报告时执行：docker compose run --rm ark doctor"
+}
+
 # 安装 / 更新服务端本体
 install_server() {
   local -a args=()
@@ -271,7 +360,23 @@ install_server() {
     warn "如需强制修复文件完整性：STEAM_VALIDATE=true docker compose run --rm ark install"
     return 0
   fi
-  die "服务端安装失败，请检查网络后重试（国内公网建议给 Docker 配置代理）"
+  dump_install_diag
+  die "服务端安装失败。
+
+  排查顺序（最常见的是第 2 条，不是第 1 条）：
+    1) 数据目录不在 Linux 文件系统上 —— 本容器启动时已自检，通过了就排除这条。
+       （自检不通过会直接退出，不会走到这里）
+    2) 与 Steam 的连接不稳 —— 国内公网主因。SteamCMD 哪怕连不上也会照样报
+       Missing file permissions / Missing configuration，别被这句话带偏。
+       解决：在 .env 里给容器配代理后 docker compose up -d
+           HTTPS_PROXY=http://host.docker.internal:7890
+           （代理软件需开启「允许局域网连接 / Allow LAN」）
+    3) SteamCMD 自身状态损坏 —— 删掉缓存重建一份：
+           docker compose down
+           mv \$HOME/ark-data/steamcmd \$HOME/ark-data/steamcmd.bak
+           docker compose up -d --build
+
+  查看完整环境自检：docker compose run --rm ark doctor"
 }
 
 server_version() {
@@ -629,6 +734,42 @@ do_restore() {
 }
 
 # =============================================================================
+#  环境自检（排障）
+# =============================================================================
+doctor() {
+  local d
+  echo "────────────────────────────────────────────────────────────"
+  echo " 容器环境自检"
+  echo "────────────────────────────────────────────────────────────"
+  echo "身份          : $(id 2>/dev/null || echo 未知)"
+  echo "HOME          : ${HOME:-未设置}"
+  echo "内核          : $(uname -srm 2>/dev/null || echo 未知)"
+  echo "目录挂载      :"
+  for d in "$ARK_SERVER_DIR" "$STEAMCMD_DIR" "$BACKUP_DIR" "$USER_CONFIG_DIR"; do
+    printf '  %-16s %s\n' "$d" "$(ls -ld "$d" 2>/dev/null || echo '不存在')"
+    printf '  %-16s 文件系统=%s  可写=%s\n' "" \
+      "$(stat -f -c %T "$d" 2>/dev/null || echo 未知)" \
+      "$([ -w "$d" ] && echo 是 || echo 否)"
+  done
+  echo "磁盘空间      :"
+  df -h "$ARK_SERVER_DIR" "$STEAMCMD_DIR" 2>/dev/null | sed 's/^/  /' || true
+  echo "inode 余量    :"
+  df -i "$ARK_SERVER_DIR" 2>/dev/null | sed 's/^/  /' || true
+  echo "代理          : HTTP_PROXY=${HTTP_PROXY:-（未设置）}"
+  echo "                HTTPS_PROXY=${HTTPS_PROXY:-（未设置）}  NO_PROXY=${NO_PROXY:-（未设置）}"
+  echo "SteamCMD      : ${STEAMCMD_PATH} $([ -x "$STEAMCMD_PATH" ] && echo '(可执行)' || echo '(缺失或不可执行)')"
+  echo "服务端        : $([ -x "$SERVER_BIN" ] && echo "已安装 buildid=$(server_version)" || echo '未安装')"
+  echo "steamapps     : $([ -d "${ARK_SERVER_DIR}/steamapps" ] && echo '已创建' || echo '未创建 → 安装没走到下载阶段，问题在 Steam 侧而非文件权限')"
+  echo "数据目录内容  :"
+  ls -la "$ARK_SERVER_DIR" 2>/dev/null | sed 's/^/  /' | head -n 20 || true
+  echo "SteamCMD 日志 : $(ls -1t "${STEAMCMD_DIR}/linux32/logs" 2>/dev/null | tr '\n' ' ' || echo '（无）')"
+  echo "────────────────────────────────────────────────────────────"
+  echo " 提示：如果 check 全绿但 SteamCMD 仍报 Missing file permissions，"
+  echo "       那多半是 Steam 连通性问题，请给容器配代理后重试（见 README FAQ 2）。"
+  echo "────────────────────────────────────────────────────────────"
+}
+
+# =============================================================================
 #  启动服务端
 # =============================================================================
 print_summary() {
@@ -762,6 +903,7 @@ main() {
     mods)
       build_mod_list
       log "最终生效的模组列表：${ACTIVE_MODS:-无}（共 ${#ACTIVE_MOD_ARRAY[@]} 个）" ;;
+    doctor)  build_mod_list; doctor ;;
     shell|bash) exec /bin/bash ;;
     version) echo "buildid=$(server_version)" ;;
     *) err "未知子命令：${cmd}"
@@ -774,6 +916,7 @@ main() {
   backup           备份存档到 ${BACKUP_DIR}
   restore <文件>   从备份恢复
   mods             打印最终生效的模组列表
+  doctor           打印环境自检（挂载/权限/磁盘/代理/SteamCMD 状态），排障用
   version          打印服务端 buildid
   shell            进入 shell
 USAGE
