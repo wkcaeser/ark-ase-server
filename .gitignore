@@ -1,4 +1,23 @@
+# 真实配置（含管理员密码等敏感信息，切勿提交）
 .env
+
+# 服务端数据、模组缓存、存档与备份（体积可达数十 GB）
 data/
+
+# 备份文件
 *.tar.gz
+*.tar.bz2
+*.zip
 *.bak
+*.bak.*
+
+# 日志
+*.log
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
