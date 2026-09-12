@@ -1,0 +1,84 @@
+# =============================================================================
+#  方舟：生存进化（ASE）专用服务器 —— docker compose 编排文件
+#
+#  使用：
+#    cp .env.example .env      # 按需修改端口/密码/倍率
+#    docker compose up -d --build
+#    docker compose logs -f
+# =============================================================================
+
+services:
+  ark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ark-ase-server:latest
+    container_name: ark-server
+    # 服务器崩溃或宿主机重启后自动拉起
+    restart: unless-stopped
+    # 停机时给够时间：入口脚本会先发 SIGINT 让服务端保存世界
+    stop_grace_period: 150s
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      # ⚠ 服务器对外宣告的端口就是它自己监听的端口，所以这里内外必须一致（${X}:${X}）。
+      #   改 PORT 时请同步把 RAW_PORT 设成 PORT+1（原版原始套接字固定为游戏端口+1）。
+      - "${PORT:-7777}:${PORT:-7777}/udp"        # 游戏主端口
+      - "${RAW_PORT:-7778}:${RAW_PORT:-7778}/udp" # 原始套接字（Raw Socket）
+      - "${QUERY_PORT:-27015}:${QUERY_PORT:-27015}/udp" # Steam 查询端口（服务器列表发现）
+      - "${RCON_PORT:-32330}:${RCON_PORT:-32330}/tcp"   # RCON 管理端口（仅建议内网/白名单开放）
+    volumes:
+      # 服务端本体 + 存档 + 模组（约 10~20 GB，务必持久化）
+      - ./data/server:/ark
+      # SteamCMD 与创意工坊缓存（避免每次重建容器都重下模组）
+      - ./data/steamcmd:/opt/steamcmd
+      # 备份
+      - ./data/backup:/backup
+      # 自定义配置覆盖目录（只读挂载）
+      - ./config:/etc/ark/config:ro
+    ulimits:
+      nofile:
+        soft: 100000
+        hard: 100000
+      nproc: 65535
+    stdin_open: true
+    tty: true
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f ShooterGameServer >/dev/null 2>&1 || exit 1"]
+      interval: 60s
+      timeout: 10s
+      start_period: 20m
+      retries: 3
+
+# =============================================================================
+#  多地图 / 集群示例（需要时取消注释，注意端口与卷目录都要错开）
+#
+#  ark-ragnarok:
+#    build: .
+#    image: ark-ase-server:latest
+#    container_name: ark-server-ragnarok
+#    restart: unless-stopped
+#    stop_grace_period: 150s
+#    env_file: [.env]
+#    environment:
+#      MAP: Ragnarok
+#      SESSION_NAME: "方舟-仙境地图"
+#      PORT: 7787
+#      RAW_PORT: 7788
+#      QUERY_PORT: 27016
+#      RCON_PORT: 32331
+#      ALT_SAVE_DIR_NAME: SavedArksRagnarok
+#      CLUSTER_ID: mycluster
+#    ports:
+#      - "7787:7787/udp"
+#      - "7788:7788/udp"
+#      - "27016:27016/udp"
+#      - "32331:32331/tcp"
+#    volumes:
+#      - ./data/server:/ark
+#      - ./data/steamcmd:/opt/steamcmd
+#      - ./data/backup:/backup
+#      - ./config:/etc/ark/config:ro
+# =============================================================================

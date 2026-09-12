@@ -1,0 +1,28 @@
+; ============================================================================
+;  Game.ini 自定义覆盖示例文件
+;
+;  用法：复制为同目录下的 Game.ini.extra（去掉 .example 后缀）
+;       容器启动时会按键名合并进生成的 Game.ini。
+;
+;  属性点索引对照（PerLevelStatsMultiplier_*[索引]）：
+;    0=生命 1=耐力 2=眩晕 3=氧气 4=食物 5=水 6=温度 7=负重
+;    8=近战伤害 9=移动速度 10=防御 11=制作速度
+; ============================================================================
+
+[/script/shootergame.shootergamemode]
+; 例：玩家每级负重 5 倍（3 倍于容器默认值也没问题，以本文件为准）
+; PerLevelStatsMultiplier_Player[7]=5
+; 例：驯养恐龙每级负重 5 倍
+; PerLevelStatsMultiplier_DinoTamed[7]=5
+; 例：玩家移动速度每级 2 倍
+; PerLevelStatsMultiplier_Player[9]=2
+; 例：恐龙每级生命 3 倍
+; PerLevelStatsMultiplier_DinoTamed[0]=3
+; 例：野生恐龙继承的属性点（影响驯服后基础值）
+; PerLevelStatsMultiplier_DinoWild[0]=1
+; 例：全服驯养的恐龙数量上限
+; MaxTamedDinos=5000
+; 例：允许在 PvE 中建造洞穴
+; bAllowCaveBuildingPvE=True
+; 例：关闭精英龙刷新
+; bDisableEliteDinos=False

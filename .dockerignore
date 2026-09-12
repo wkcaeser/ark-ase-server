@@ -1,0 +1,10 @@
+# 构建上下文排除项
+.git
+.gitignore
+data/
+backup/
+*.tar.gz
+*.log
+.env
+README.md
+docs/
