@@ -1,0 +1,59 @@
+# =============================================================================
+#  Git 行尾（EOL）统一策略
+#
+#  背景：Windows 版 Git 默认 core.autocrlf=true，检出时会把文本文件的 LF
+#  自动改成 CRLF。本项目的 entrypoint.sh 是 Linux 容器入口脚本，一旦带上
+#  CRLF，容器内 shebang 就变成 "#!/usr/bin/env bash\r"，启动立刻报错：
+#      /usr/bin/env: 'bash\r': No such file or directory
+#
+#  注意：单靠 `* text=auto` 挡不住 core.autocrlf —— 那只约束「入库」方向，
+#  检出方向仍会被 autocrlf 转成 CRLF。必须对具体文件显式声明 `eol=lf`，
+#  属性优先级高于 core.autocrlf，才能从根上杜绝该问题复发。
+#  修改本文件后，执行一次 `git add --renormalize .` 即可让索引同步。
+# =============================================================================
+
+# 默认：由 Git 自动判定文本文件（二进制不转换），仓库内统一以 LF 存储
+* text=auto
+
+# ----------------------------- 必须保持 LF -----------------------------------
+# Linux 容器 / 构建相关
+*.sh                 text eol=lf
+*.bash               text eol=lf
+entrypoint.sh        text eol=lf
+Dockerfile           text eol=lf
+Dockerfile.*         text eol=lf
+*.dockerfile         text eol=lf
+docker-compose*.yml  text eol=lf
+docker-compose*.yaml text eol=lf
+Makefile             text eol=lf
+.dockerignore        text eol=lf
+
+# 配置模板（会被挂进容器读取）
+*.ini                text eol=lf
+*.example            text eol=lf
+*.env                text eol=lf
+
+# 文档与仓库元文件
+*.md                 text eol=lf
+*.txt                text eol=lf
+LICENSE              text eol=lf
+.gitignore           text eol=lf
+.gitattributes       text eol=lf
+
+# --------------------------- Windows 专用：保持 CRLF -------------------------
+*.bat                text eol=crlf
+*.cmd                text eol=crlf
+*.ps1                text eol=crlf
+
+# --------------------------- 二进制：禁止任何转换 ----------------------------
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.pdf     binary
+*.zip     binary
+*.gz      binary
+*.tgz     binary
+*.tar     binary
+*.7z      binary

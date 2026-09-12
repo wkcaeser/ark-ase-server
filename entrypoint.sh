@@ -161,9 +161,12 @@ FUEL_CONSUMPTION_INTERVAL_MULTIPLIER="${FUEL_CONSUMPTION_INTERVAL_MULTIPLIER:-1}
 USE_SINGLEPLAYER_SETTINGS="${USE_SINGLEPLAYER_SETTINGS:-false}"
 
 # --------------------------- 模组 -------------------------------------------
-# 默认模组：野人模组（Extinction Core / 起源2 灭绝野人）+ A镜（Awesome SpyGlass!）
-DEFAULT_MODS="${DEFAULT_MODS:-817096835,1404697612}"
-ENABLE_DEFAULT_MODS="${ENABLE_DEFAULT_MODS:-true}"   # 是否加载上面两个默认模组
+# 默认模组（列表顺序 = 加载顺序）：
+#   761535755   物品叠加（Ultra Stacks）—— 叠加/大修类模组放最前面，避免被内容模组盖掉
+#   817096835   野人模组（Extinction Core / 起源2 灭绝野人）
+#   1404697612  A镜（Awesome SpyGlass!）
+DEFAULT_MODS="${DEFAULT_MODS:-761535755,817096835,1404697612}"
+ENABLE_DEFAULT_MODS="${ENABLE_DEFAULT_MODS:-true}"   # 是否加载上面三个默认模组
 EXTRA_MODS="${EXTRA_MODS:-}"                         # 追加模组，逗号或空格分隔
 MODS="${MODS:-}"                                     # 完全自定义：设置后忽略默认模组与 EXTRA_MODS
 
@@ -291,7 +294,7 @@ build_mod_list() {
     if is_true "$ENABLE_DEFAULT_MODS"; then
       raw="$DEFAULT_MODS"
     else
-      warn "ENABLE_DEFAULT_MODS=false，本次不加载默认模组（野人模组 / A镜）"
+      warn "ENABLE_DEFAULT_MODS=false，本次不加载默认模组（叠加 / 野人模组 / A镜）"
     fi
     if [ -n "${EXTRA_MODS// /}" ]; then
       raw="${raw:+${raw},}${EXTRA_MODS}"

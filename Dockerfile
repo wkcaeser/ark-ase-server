@@ -69,7 +69,12 @@ RUN mkdir -p "${STEAMCMD_DIR}" \
 RUN mkdir -p "${ARK_SERVER_DIR}" "${BACKUP_DIR}" "${USER_CONFIG_DIR}"
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh \
+# 兜底处理：Windows 下克隆项目时 Git 的 core.autocrlf=true 会把 entrypoint.sh
+# 的 LF 自动转成 CRLF，导致容器内 shebang 变成 "#!/usr/bin/env bash\r"，
+# 启动即报 `/usr/bin/env: 'bash\r': No such file or directory`。
+# 这里在构建期统一剥掉行尾的 CR，保证脚本在任何构建环境下都能正常执行。
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh \
+ && chmod +x /usr/local/bin/entrypoint.sh \
  && ln -sf /usr/local/bin/entrypoint.sh /usr/local/bin/ark-server
 
 # -----------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 # 方舟：生存进化（ASE）Docker 专用服务器
 
 开箱即用的《方舟：生存进化》（**ARK: Survival Evolved**，非"生存飞升"ASA）专用服务器，
-默认加载 **野人模组 + A镜模组**，并支持通过环境变量追加模组、调整负重 / 孵化 / 驯养等全部倍率。
+默认加载 **物品叠加 + 野人模组 + A镜模组**，并支持通过环境变量追加模组、调整负重 / 孵化 / 驯养等全部倍率。
 
 - 服务端与模组在**容器首次启动时自动下载**，镜像只有几百 MB，重建镜像不用重新下游戏
 - 所有配置写进 `.env` 一个文件，改完 `docker compose up -d` 即可生效
@@ -77,14 +77,14 @@ docker compose logs -f
 
 ```
 [信息] 安装/更新服务端（AppID=376030）到 /ark      <-- 约 10 分钟，取决于网速
-[信息] 需要处理的模组：817096835,1404697612        <-- 野人（3.1GB）+ A镜（3.3MB）
+[信息] 需要处理的模组：761535755,817096835,1404697612  <-- 叠加（1.6MB）+ 野人（3.1GB）+ A镜（3.3MB）
 [完成] 模组 817096835 已就绪（复制）-> /ark/ShooterGame/Content/Mods/817096835
 [完成] 已生成 .../GameUserSettings.ini
 [完成] 已生成 .../Game.ini
 [信息] 服务端进程 PID=xx，日志输出中…
 ```
 
-> 首次启动总计要下载 **约 14 GB**（服务端 10 GB + 野人模组 3.1 GB），
+> 首次启动总计要下载 **约 14 GB**（服务端 10 GB + 野人模组 3.1 GB，叠加与 A镜各几 MB），
 > 中途 Ctrl+C 或重启容器都没关系，SteamCMD 会接着下完。
 
 看到 `Server has completed startup` / `Server started` 之类的日志，就说明起来了。
@@ -138,16 +138,21 @@ ark-ase-server/
 
 ## 三、模组管理
 
-### 默认加载的两个模组
+### 默认加载的三个模组
 
 | 模组 | 说明 | Mod ID | 体积 |
 | --- | --- | --- | --- |
+| 物品叠加 | Ultra Stacks，大幅提高物品堆叠上限并降低单个物品重量，仓库和背包不再爆格 | `761535755` | 约 1.6 MB |
 | 野人模组 | Extinction Core（中文圈常称「起源2：灭绝野人」），新增彩色系野人 NPC 部落、世界 BOSS 等 | `817096835` | **约 3.1 GB** |
 | A镜 | Awesome SpyGlass!（超级望远镜），显示生物属性、等级、坐标、描边 | `1404697612` | 约 3.3 MB |
 
+> **加载顺序有讲究**：叠加 / 大修类模组（Ultra Stacks）排在列表**最前面**，
+> 大型内容模组与地图模组排在后面 —— 反过来排的话，叠加模组的物品定义可能被内容模组覆盖而不生效。
+> 默认顺序 `761535755 -> 817096835 -> 1404697612` 已经按这个规则排好，通常不需要改动。
+
 > 如果你要的"野人"是**原始 NPC Primal NPCs（1803395040）**或**人类 NPC Human NPCs（1443404076）**，
 > 直接改 `.env` 里的 `DEFAULT_MODS` 即可，例如：
-> `DEFAULT_MODS=1803395040,1404697612`
+> `DEFAULT_MODS=761535755,1803395040,1404697612`
 
 > ⚠ 野人模组有 3.1 GB，加上服务端本体约 10 GB，**首次启动总共要下载 14 GB 左右**，
 > 加上磁盘上模组的"缓存 + 部署副本"两份，建议预留 **40 GB 以上**磁盘空间。
@@ -164,16 +169,18 @@ ENABLE_DEFAULT_MODS=true
 **② 在默认模组基础上追加自己的模组（最常用）**
 
 ```env
-EXTRA_MODS=761535755,955655993
+EXTRA_MODS=955655993
 ```
 - 逗号或空格分隔都可以
-- 重复的 ID 会自动去重，非数字的 ID 会被跳过并给出警告
-- 最终加载顺序 = `默认模组 -> EXTRA_MODS`（**后面的模组会覆盖前面的**，改数值类的模组建议放后面）
+- 重复的 ID 会自动去重（比如把已经在默认列表里的 `761535755` 又写进 `EXTRA_MODS`），非数字的 ID 会被跳过并给出警告
+- 最终加载顺序 = `默认模组 -> EXTRA_MODS`
+- ⚠ 追加**叠加类**模组时要留意：它会被排在默认的 Ultra Stacks 之后，两个叠加模组会互相冲突。
+  叠加模组同一时间只启用一个，改用下面的 `MODS` 完全自定义、把它排到最前面即可。
 
 **③ 完全自定义（不再加载默认模组）**
 
 ```env
-MODS=817096835,1404697612,761535755,955655993
+MODS=761535755,817096835,1404697612,955655993
 ```
 只要 `MODS` 不为空，`ENABLE_DEFAULT_MODS` 和 `EXTRA_MODS` 就全部失效。
 
@@ -198,7 +205,11 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=1404697612
   ```
   改成符号链接后几乎不占额外空间；若发现模组加载异常，改回 `auto` 即可。
 - **玩家也要订阅同样的模组**，否则进不去（客户端缺少模组会被踢回主菜单）。
-- **加载顺序**会影响互相覆盖的效果，数值类 / 汉化类模组建议排在后面。
+- **加载顺序**很重要：`-mods=` 里靠前的先加载，靠后的优先生效（后面的会覆盖前面的）
+  - **叠加 / 大修 / 建筑类模组放最前面**（如 Ultra Stacks、S+），否则物品定义可能被内容模组覆盖而不生效
+  - **数值 / 汉化 / 内容类模组放后面**，让它们的改动最终生效
+  - **叠加模组之间互不兼容**，同一个服务器只保留一个
+  - 默认顺序 `761535755(叠加) -> 817096835(野人) -> 1404697612(A镜)` 就是按这个规则排的
 - 模组更新后建议重启容器：`docker compose restart`（`MOD_UPDATE=true` 时会在启动时检查更新）。
 - 下载失败（已下架、作者设为私密、网络超时）日志里会给出提示，把该 ID 从列表里删掉即可。
   只想单独重试模组而不动服务端：`docker compose run --rm ark install-mods`。
@@ -244,8 +255,8 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=1404697612
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `ENABLE_DEFAULT_MODS` | `true` | 是否加载默认模组（野人 + A镜） |
-| `DEFAULT_MODS` | `817096835,1404697612` | 默认模组列表（想换野人模组就改这里） |
+| `ENABLE_DEFAULT_MODS` | `true` | 是否加载默认模组（叠加 + 野人 + A镜） |
+| `DEFAULT_MODS` | `761535755,817096835,1404697612` | 默认模组列表（想换野人模组就改这里；叠加类模组保持在最前） |
 | `EXTRA_MODS` | 空 | 追加模组 |
 | `MODS` | 空 | 完全自定义列表（一填就忽略上面两个） |
 | `MOD_LINK_MODE` | `auto` | 模组挂接方式：`auto` / `copy` / `symlink` |
@@ -294,7 +305,7 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=1404697612
 | 幼体食量 | `BABY_FOOD_CONSUMPTION_SPEED_MULTIPLIER` | `BabyFoodConsumptionSpeedMultiplier` | 幼体吃得快不快 |
 | **玩家每级负重** | `PLAYER_WEIGHT_PER_LEVEL_MULTIPLIER` | `PerLevelStatsMultiplier_Player[7]` | 每点属性加的负重 = 原版 × 该倍率 |
 | **恐龙每级负重** | `DINO_WEIGHT_PER_LEVEL_MULTIPLIER` | `PerLevelStatsMultiplier_DinoTamed[7]` | 同上，作用于驯养后的恐龙 |
-| 物品重量 | `ITEM_WEIGHT_MULTIPLIER` | `ItemWeightMultiplier` | `<1` 表示物品变轻；部分服务端版本会忽略此项，最稳的减重方式是叠加/减重类模组 |
+| 物品重量 | `ITEM_WEIGHT_MULTIPLIER` | `ItemWeightMultiplier` | `<1` 表示物品变轻；部分服务端版本会忽略此项，最稳的减重方式是叠加/减重类模组（本项目默认已加载 Ultra Stacks） |
 | 经验倍率 | `XP_MULTIPLIER` | `XPMultiplier` | |
 | 采集倍率 | `HARVEST_AMOUNT_MULTIPLIER` | `HarvestAmountMultiplier` | |
 | 资源血量（采集手感） | `HARVEST_HEALTH_MULTIPLIER` | `HarvestHealthMultiplier` | `<1` 时敲一下出更多资源 |
@@ -504,7 +515,10 @@ docker compose exec ark bash
 
 - 确认日志里有 `模组 xxx 已就绪`，且启动命令带上了正确的 `-mods=` 列表（日志里会完整打印启动命令）。
 - 玩家客户端必须**订阅相同的模组**（含同一个 Mod ID），否则会被踢回主菜单。
-- 模组顺序有讲究：数值类/汉化类建议放列表后面。
+- 模组顺序有讲究：叠加/大修类放最前面，数值/汉化/内容类放后面；叠加模组只保留一个。
+- **叠加模组不生效**的典型症状是堆叠上限仍是原版数值。除了顺序问题，还要确认：
+  改完 `.env` 后确实执行了 `docker compose up -d`、玩家客户端也订阅了 `761535755`；
+  若之前用过别的叠加模组，存档里已转换过的物品可能需要在游戏内重新堆叠一次。
 - 检查 `data/server/ShooterGame/Content/Mods/<ModID>` 目录是否存在、里面是否有 `.mod` 文件。
 
 ### 4. 玩家搜不到服务器
@@ -572,6 +586,54 @@ sudo chown -R 1000:1000 data/
 ```
 
 入口脚本会自动适配非 root 环境（用户的 `~/.steam`、目录创建失败都会降级处理，不再中断启动）。
+
+### 12. 容器起来就疯狂重启，日志刷 `/usr/bin/env: 'bash\r': No such file or directory`
+
+**Windows / WSL 环境最常见的问题**，和代码无关，是**行尾符**（EOL）导致的。
+
+Windows 版 Git 默认 `core.autocrlf=true`，克隆代码时会把 `entrypoint.sh` 的 LF 自动
+改成 CRLF。文件进了镜像后，第一行就成了：
+
+```
+#!/usr/bin/env bash\r
+```
+
+内核会把 `bash\r` 当成解释器名字去找，自然找不到，于是容器启动即退出；
+又因为 `restart: unless-stopped`，就变成日志刷屏的无限重启。
+
+**修复方式（本仓库 v1 已自带 `.gitattributes` + Dockerfile 兜底，正常不会再遇到）**
+
+如果是**旧版本代码**或别人给你的压缩包，手动做一次即可：
+
+```bash
+# 方式一：装 dos2unix（推荐）
+sudo apt-get install -y dos2unix && dos2unix entrypoint.sh
+
+# 方式二：用 sed 剥掉行尾的 CR
+sed -i 's/\r$//' entrypoint.sh
+
+# 方式三：Git 层面根治（在仓库根目录执行一次）
+printf '* text=auto\n*.sh text eol=lf\nDockerfile text eol=lf\n' > .gitattributes
+git add --renormalize .
+git commit -m "chore: 统一行尾为 LF"
+```
+
+改完**必须重建镜像**（脚本是打进镜像里的，只改文件不重新构建不生效）：
+
+```bash
+docker compose up -d --build
+docker compose logs -f
+```
+
+**自查命令**（返回 0 说明文件是干净的 LF）：
+
+```bash
+grep -c $'\r' entrypoint.sh      # 输出 0 就正常；输出等于行数说明是 CRLF
+file entrypoint.sh               # 期望看到 "ASCII text"，若带 "CRLF" 则有问题
+```
+
+> 顺带提一句：Windows 上编辑脚本建议把编辑器设置为「LF」换行符，
+> 或把 Git 全局配置改成 `git config --global core.autocrlf input`。
 
 ---
 
