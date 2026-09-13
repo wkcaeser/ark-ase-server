@@ -1072,6 +1072,100 @@ docker compose exec ark curl -sS -o /dev/null -w '%{http_code}\n' --max-time 10 
 
 ---
 
+### 17. 服务端每隔几分钟就被重启一次，永远连不上
+
+**现象**
+
+- `docker ps` 里 `ark-server` 的存活时间永远停在几秒 / 一两分钟
+- 日志里反复出现同一句：
+
+  ```
+  收到停止信号，向服务端发送 SIGINT（触发保存世界并优雅退出）…
+  ```
+
+- 服务端刚启动、端口刚监听，就被停掉了；下次开起来又要重新校验模组（大模组可能
+  3 GB 以上），还没启动完就又被停
+- `docker inspect` 里 `RestartCount=0`、`ExitCode=0`、`OOMKilled=false` —— 看起来
+  完全"正常退出"，所以很难往 docker 身上想
+
+**真因：WSL2 的空闲自动关机（跟本项目、跟 docker 都无关）**
+
+WSL2 有两层独立的空闲计时器：
+
+| 计时器 | 默认值 | 触发后做什么 |
+| --- | --- | --- |
+| 实例空闲（instance） | 约 8 秒 | 没有终端会话后终止该发行版实例，dockerd 随之停止 |
+| **虚拟机空闲（VM）** | **60 秒** | 所有实例都终止后，把整个 WSL2 虚拟机**关机** |
+
+只要最后一个 WSL 终端关闭，约一分钟后整个 VM 就被关掉。dockerd 停 → 所有容器
+收到 `SIGTERM` → 本项目 entrypoint 的 `graceful_stop` 触发（就是上面那句日志）→
+容器以退出码 0 正常退出。等你下次开终端，WSL 又启动、容器又被 `restart: unless-stopped`
+拉起，但 ARK 还没启动完就再次被回收 —— **死循环**。
+
+顺带解释一个反直觉的现象：**开着终端盯着它时不重启，一走开就重启。**
+因为 VM 只在没有任何会话时才计时，挂着会话排查时永远看不到问题。
+
+**验证方法**
+
+```bash
+# 第一次
+wsl -d Ubuntu-24.04 -- bash -c "cut -d. -f1 /proc/uptime"   # 例如 33
+# 关掉所有 WSL 终端，什么都不做等 95 秒
+wsl -d Ubuntu-24.04 -- bash -c "cut -d. -f1 /proc/uptime"   # 变成 5 → VM 被重启了
+```
+
+uptime 不增反降，就是被回收了。
+
+**修复：在 `%USERPROFILE%\.wslconfig` 里关掉两个计时器**
+
+```ini
+[general]
+instanceIdleTimeout=-1
+
+[wsl2]
+vmIdleTimeout=-1
+```
+
+改完执行 `wsl --shutdown`，等约 10 秒再重新进 WSL 生效。之后：
+
+```bash
+# 空闲 3 分钟后再看，uptime 应该持续增长，容器不再重启
+wsl -d Ubuntu-24.04 -- bash -c "cut -d. -f1 /proc/uptime; docker ps --format '{{.Status}}'"
+```
+
+**副作用**：WSL2 虚拟机会一直占用内存，不再自动释放。不用服务器时手动
+`wsl --shutdown` 即可。
+
+---
+
+### 18. 容器显示 healthy，但服务端其实没在跑
+
+**现象**：`docker ps` 显示 `(healthy)`，可端口没人监听、A2S 探测超时。
+
+**真因**：健康检查命令
+
+```yaml
+test: ["CMD-SHELL", "pgrep -f ShooterGameServer >/dev/null 2>&1 || exit 1"]
+```
+
+`pgrep -f` 匹配的是**完整命令行**，而执行这条命令的 shell 自身的命令行里就含有
+`ShooterGameServer` 这个字符串。`pgrep` 只会排除自己，**不会排除父进程 `sh -c`**
+⇒ 永远能匹配到 ⇒ 永远返回 0 ⇒ 永远 healthy。
+
+**修复**：把模式写成正则字符类，让它匹配不到命令自身：
+
+```yaml
+test: ["CMD-SHELL", "pgrep -f '[S]hooterGameServer' >/dev/null 2>&1 || exit 1"]
+```
+
+`'[S]hooterGameServer'` 作为正则仍能匹配真实的 `ShooterGameServer` 进程，
+但字面量 `[S]hooterGameServer` 不匹配自身。
+
+**验证**：`docker inspect ark-server --format '{{json .State.Health}}'`，
+或临时 `docker compose exec ark pgrep -af '[S]hooterGameServer'`。
+
+---
+
 ## 十、免责声明
 
 - 本项目仅提供容器化部署工具与文档，**不包含任何游戏本体文件**，游戏资源由 SteamCMD 从 Valve 官方渠道下载。
