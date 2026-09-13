@@ -1019,6 +1019,57 @@ bash tools/reset.sh --purge --up  # 清完直接重新构建并启动
 `docker compose restart` 和 restart 策略都**不会**重读 `.env`，容器里的环境变量是
 「创建那一刻」固化的。这正是「`.env` 里代理已经清空、容器却还在用旧代理」的成因。
 
+### 16. 容器里 `steamcommunity.com` 解析成 `198.18.x.x`，是出问题了吗？
+
+**大概率不是。** 这是宿主机代理软件（Clash / Surge / v2rayN 等）开启 **TUN + fake-ip**
+后的正常现象。
+
+**现象**
+
+```bash
+docker compose exec ark getent hosts steamcommunity.com
+# 198.18.1.94     steamcommunity.com     ← 真实地址应该是 23.x 这类公网 IP
+```
+
+**为什么会拿到假 IP**
+
+`198.18.0.0/15` 是 RFC 保留网段，**公网不路由**。fake-ip 模式下，代理软件对任何 DNS
+查询都不返回真实 IP，而是从这个段里发一个假地址，同时自己记一张 `假IP → 域名` 的映射表。
+等你真去连它时，虚拟网卡（Windows 上的 `Meta` 适配器）把包拦下来，查表还原出域名，
+再按规则决定直连还是走代理。
+
+这么做是为了**省掉真实 DNS 往返**（更快）和**避免 DNS 查询外泄**。
+
+**唯一可靠的判据：实测能不能通**
+
+```bash
+docker compose exec ark curl -sS -o /dev/null -w '%{http_code}\n' --max-time 10 https://steamcommunity.com/
+```
+
+- 返回 `200` / `3xx`，甚至 `404`（根路径本来就没内容）⇒ **链路是通的**，假 IP 被正确接管，**不用管**
+- 卡到超时 / `Could not resolve` / `Connection timed out` ⇒ 这才是真出问题
+
+> ⚠ **别拿 `getent hosts` / `nslookup` 的结果当故障证据。** 看到 `198.18.x.x` 就断定
+> 「网络有问题」是常见误判 —— 本项目排查过程中就踩过一次。
+
+**什么时候假 IP 真的会坏事**
+
+同样是拿到假 IP，两类名字的后果相反：
+
+| 名字 | 拿到假 IP 的后果 |
+| --- | --- |
+| 公网域名（`steamcommunity.com`、`api.steampowered.com`…） | 通常**没事**，虚拟网卡会接管并还原 |
+| `host.docker.internal` | **必坏** —— 它要真实回连宿主机，假地址连不回去 |
+
+`host.docker.internal` 这条，正是 [FAQ 2](#2-steamcmd-下载慢或失败) 里「配了代理反而更差」
+的原因之一。
+
+**顺带：`[S_API FAIL] SteamAPI_Init() failed` 是什么**
+
+它跟 fake-ip 无关。专用服务器上没有 Steam 客户端进程，这个初始化失败是**常态**，
+成功启动的日志里同样有这一行。实际影响是**服务器不会出现在游戏内官方列表**，
+玩家需要用直连 IP 加入（见 [FAQ 4](#4-玩家搜不到服务器)）。局域网直连与查询端口不受影响。
+
 ---
 
 ## 十、免责声明
