@@ -100,6 +100,9 @@ docker compose logs -f
    open 你的公网IP:7777
    ```
 3. Steam 用户也可以收藏服务器：`Steam → 查看 → 游戏服务器 → 收藏 → 添加服务器 → 你的公网IP:27015`
+
+> 只在**本机或局域网**玩的话，不用公网 IP，连接地址见
+> [八、端口与网络 → 连接地址速查](#连接地址速查windows--wsl2-部署)。
 4. 管理员权限：进游戏后按 `Tab`，输入 `enablecheats 你在 .env 里设置的服务器管理员密码`
 5. 常用管理员指令：
    ```
@@ -485,6 +488,22 @@ docker compose logs -f       # 确认识别到了新的倍率与模组
   例如 `PORT=7788` 时 `RAW_PORT=7789`。
 - 家庭宽带无公网 IP：可用 frp / 花生壳等内网穿透，**UDP 必须一起转发**，否则玩家连不上。
 - 想改服务器名字、地图后，客户端搜索可能要等几分钟才刷新，用 `open IP:7777` 直接连最快。
+
+### 连接地址速查（Windows + WSL2 部署）
+
+WSL2 的网络模式决定了「谁能连、用哪个 IP 连」，这是两套完全不同的行为：
+
+| 谁在连 | NAT 模式（默认） | mirrored 模式（推荐） |
+| --- | --- | --- |
+| **跑服务器的这台电脑自己** | `wsl hostname -I` 得到的 `172.x.x.x:27015`（**每次重启 WSL 都会变**） | `localhost:27015`（固定，最省事） |
+| **局域网内其它设备** | ❌ 连不上（没有到 `172.18.0.0/16` 的路由） | ✅ `192.168.10.10:27015`（宿主机局域网 IP，固定） |
+
+> 注意：mirrored 模式下，**宿主机自己不要用局域网 IP 连**（Windows 会把发往自己 IP 的包在本地消化掉，
+> 不会镜像给 WSL），用 `localhost` 即可；局域网其它设备才用 `192.168.10.10`。
+
+游戏内连接用 `open <地址>:7777`（游戏端口），收藏服务器用 `<地址>:27015`（查询端口）。
+
+开启 mirrored 模式的方法见 [FAQ 19](#19-本机局域网该用哪个-ip-连nat-还是-mirrored)。
 
 ---
 
@@ -1163,6 +1182,59 @@ test: ["CMD-SHELL", "pgrep -f '[S]hooterGameServer' >/dev/null 2>&1 || exit 1"]
 
 **验证**：`docker inspect ark-server --format '{{json .State.Health}}'`，
 或临时 `docker compose exec ark pgrep -af '[S]hooterGameServer'`。
+
+---
+
+### 19. 本机/局域网该用哪个 IP 连？（NAT 还是 mirrored）
+
+**现象**：服务器在跑、容器也 healthy，但只有跑服务器这台电脑能连，局域网其它电脑怎么都连不上；
+或者 `wsl hostname -I` 每次给出的 IP 都不一样。
+
+**真因**：WSL2 默认是 **NAT 模式**。此时 WSL 是一个独立内网，容器发布的端口只活在宿主机的
+`172.x` 虚拟网卡上：
+
+- 宿主机自己 → 因为 `172.x` 段是「在链路上」路由，能直接送到，所以能连
+- 局域网其它设备 → 它们的路由表里只有 `192.168.10.0/24`，**没有任何一条到 `172.18.0.0/16` 的路**，
+  包到了宿主机就被丢掉 ⇒ 超时
+- 而且这个 `172.x` 是 WSL 每次重启**重新分配**的，不固定
+
+**修复**：改用 **mirrored 网络模式**，让 WSL 直接镜像宿主机的网卡，容器发布的端口就落在
+宿主机的局域网 IP 上。
+
+编辑 `%USERPROFILE%\.wslconfig`：
+
+```ini
+[wsl2]
+networkingMode=mirrored
+dnsTunneling=true
+autoProxy=false
+firewall=false
+```
+
+然后 `wsl --shutdown`，重新进入发行版。验证：
+
+```powershell
+wsl -d Ubuntu-24.04 -- hostname -I      # 应显示宿主机的局域网 IP，例如 192.168.10.10
+wsl -d Ubuntu-24.04 -- ping -c 2 192.168.10.1   # 能通说明镜像网卡真的接在局域网上了
+```
+
+**为什么 `firewall=false`**：Hyper-V 防火墙集成开启时会**静默丢弃**从 Windows/局域网进入 WSL 的
+UDP 包，表现就是「服务端明明在跑、端口也在监听，但探测全部超时」。关掉它可避免这个坑。
+
+**踩坑提示**：mirrored 模式与 Clash 的 **TUN 模式互斥**。TUN 会把默认路由改成 `198.18.0.2`
+写入宿主机和 WSL 的路由表，导致容器出网被劫持、SteamCMD 卡在
+`Connecting anonymously to Steam Public...Retrying`。**用 mirrored 时请保持 TUN 关闭，改用系统代理模式。**
+
+**回退**：删掉 `networkingMode=mirrored` 一行 → `wsl --shutdown`，即回到 NAT。
+
+**验证连通性**（项目自带探针，A2S 协议，比 `ping` 可靠）：
+
+```powershell
+python tools\a2s-probe.py localhost:27015          # 宿主机自己
+python tools\a2s-probe.py 192.168.10.10:27015      # 模拟局域网设备（在别的机器上跑）
+```
+
+期望输出：`OK  地图=TheIsland 玩家=0/70  名称=...`
 
 ---
 

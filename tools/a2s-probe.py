@@ -34,24 +34,37 @@ def probe(host, port, timeout=3.0):
 
 
 def parse(data):
-    """解析 A2S_INFO 的固定前缀部分，失败返回 None。"""
+    """解析 A2S_INFO 响应的固定前缀，失败返回 None。
+
+    响应布局（Source Engine Query）：
+        FF FF FF FF | 0x49 'I' | protocol(byte) | name\0 | map\0 | folder\0 |
+        game\0 | appid(short) | players(byte) | max_players(byte) | ...
+    """
     try:
-        idx = data.index(b"\x00", 1) + 1
-        name = data[1:idx - 1].decode("utf-8", "replace")
-        rest = data[idx:]
-        fields = []
-        for _ in range(5):  # map, folder, game, game_desc(short), game_desc
-            cut = rest.index(b"\x00")
-            fields.append(rest[:cut].decode("utf-8", "replace"))
-            rest = rest[cut + 1:]
-        cut = rest.index(b"\x00")  # steam app id 之后
-        rest = rest[cut + 1:]
+        if len(data) < 6 or data[:4] != b"\xff\xff\xff\xff" or data[4] != 0x49:
+            return None
+
+        pos = 6  # 跳过 4 字节头 + 类型字节 + 协议字节
+
+        def read_str(offset):
+            end = data.index(b"\x00", offset)
+            return data[offset:end].decode("utf-8", "replace"), end + 1
+
+        name, pos = read_str(pos)
+        map_name, pos = read_str(pos)
+        folder, pos = read_str(pos)
+        game, pos = read_str(pos)
+        appid = int.from_bytes(data[pos:pos + 2], "little")
+        pos += 2
+
         return {
             "name": name,
-            "map": fields[0],
-            "game": fields[2],
-            "players": rest[0],
-            "max": rest[1],
+            "map": map_name,
+            "folder": folder,
+            "game": game,
+            "appid": appid,
+            "players": data[pos],
+            "max": data[pos + 1],
         }
     except Exception:
         return None
