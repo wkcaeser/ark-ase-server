@@ -78,6 +78,21 @@ services:
     #   host-gateway 是 Docker 20.10+ 的内置关键字，指向宿主机的网关地址。
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # =========================================================================
+    #  网络模式：默认 bridge（端口经 Docker 映射，出网走 docker NAT）
+    #
+    #  ⚠⚠ 别轻易改 host：实测在「WSL2 镜像网络 + Clash TUN」环境下，host 模式会让
+    #  容器默认路由直接走 TUN（default via 198.18.0.2），出网被吞 —— SteamCMD 连不上
+    #  Steam，卡在 "Connecting anonymously to Steam Public...Retrying..."，服务起不来。
+    #  同一环境下 bridge 模式 curl Steam 返回 200，正常。
+    #
+    #  需要 host 模式的场合（宿主机无 TUN 干扰、跑在 Linux 服务器上等）：
+    #    1. 打开下面这行 network_mode，并注释掉 ports: 段
+    #    2. docker compose up -d --force-recreate
+    #  切到 host 后，.env 里的 PORT / RAW_PORT / QUERY_PORT / RCON_PORT 就是宿主机端口，
+    #  多实例时这些端口必须各不相同。
+    # =========================================================================
+    # network_mode: host
     ports:
       # ⚠ 服务器对外宣告的端口就是它自己监听的端口，所以这里内外必须一致（${X}:${X}）。
       #   改 PORT 时请同步把 RAW_PORT 设成 PORT+1（原版原始套接字固定为游戏端口+1）。
@@ -106,12 +121,35 @@ services:
       nproc: 65535
     stdin_open: true
     tty: true
+    networks:
+      - arknet
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f ShooterGameServer >/dev/null 2>&1 || exit 1"]
       interval: 60s
       timeout: 10s
       start_period: 20m
       retries: 3
+
+# =============================================================================
+#  容器网络：显式指定网段，避开 WSL2 的 NAT 网段
+#
+#  ⚠ 不要删掉这段让它走默认。WSL2 的 eth0 网段是自动分配的（172.16.0.0/12 里挑一个
+#  /20），每次重启可能变，而且**可能与 Docker 网桥重叠**。实测踩过一次：
+#  WSL 被分到 172.18.46.222，而 compose 默认网桥正好是 172.18.0.0/16 ——
+#  两者重叠导致路由歧义，Windows 侧发往 WSL 的 UDP 全部超时（ping 却通，
+#  因为 ICMP 走的是另一条路）。
+#  把 Docker 挪到 172.30.0.0/16 后立刻恢复。选段原则：避开 172.17（docker0）、
+#  172.18~172.31（WSL 可能占用的范围），172.30 是相对安全的选择。
+#  若你的 WSL 恰好也在 172.30，改成本机 `ip -4 addr show eth0` 里没出现的其他段。
+# =============================================================================
+networks:
+  arknet:
+    name: ark-ase-net
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.30.0.0/16
+          gateway: 172.30.0.1
 
 # =============================================================================
 #  多地图 / 集群示例（需要时取消注释，注意端口与卷目录都要错开）
