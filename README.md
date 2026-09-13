@@ -259,6 +259,11 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=1404697612
 | `SHOW_FLOATING_DAMAGE_TEXT` | `true` | 显示浮动伤害数字 |
 | `ALLOW_HIT_MARKERS` | `true` | 命中标记 |
 
+> ⚠ 本表里的开关是**会话级**设置，服务端只认命令行。入口脚本会自动把它们拼到启动 URL 上，
+> 你不用手动处理；但如果自己去改 `GameUserSettings.ini.extra` 就会发现「改了没用」——
+> 原因见 [FAQ 21](#21-env-里-pve--伤害数值--难度改了没反应--服务端把-ini-重写了)。
+> 改完这些开关**必须 `docker compose up -d --force-recreate`** 才生效。
+
 ### 3. 模组
 
 | 变量 | 默认值 | 说明 |
@@ -284,6 +289,8 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=1404697612
 | `STEAMCMD_RETRIES` | `3` | SteamCMD 失败重试次数 |
 | `STEAM_USER` | 空 | Steam 账号；留空=匿名登录。通常不需要，仅在容器/网络都确认干净、匿名确实被挡时才试（见 FAQ 15 修复四） |
 | `STEAM_PASS` | 空 | 上面的密码；日志里会自动打码成 `***`。**别把 `.env` 提交进 git** |
+| `EXTRA_ARGS` | 空 | 追加任意**启动参数**（原样追加，不拼进地图 URL），如 `-ForceAllowCaveFlyers` |
+| `EXTRA_URL_ARGS` | 空 | 追加任意 **URL 参数**（拼进地图 URL），用于那些「服务端只认命令行」的设置，如 `ForceAllowCaveFlyers=true?bDisableFriendlyFire=true`。见 [FAQ 21](#21-env-里-pve--伤害数值--难度改了没反应--服务端把-ini-重写了) |
 
 ### 5. 集群（多地图互通，可选）
 
@@ -403,6 +410,13 @@ CONFIG_REGENERATE=false
 | `Game.ini` | 玩法/模式类设置（`[/script/shootergame.shootergamemode]`）：每级属性倍率、单机模式加成、模组相关的数值覆盖等 |
 
 > 同一个设置同时出现在两个文件里时，以 `Game.ini` 为准；服务端不认识的键会被静默忽略。
+
+> ⚠ **有一类键写 `GameUserSettings.ini`（含 `.extra` 覆盖文件）是没有用的**：
+> 服务端启动时会用内置默认模板整体重写该文件，`ServerPVE`、`ServerHardcore`、
+> `ShowFloatingDamageText`、`DifficultyOffset`、`OverrideOfficialDifficulty`、
+> `AllowFlyerCarryPvE`、`DisableStructureDecayPvE` 这些**会话级选项会被整行丢掉**，
+> 只能走命令行（`.env` 里已有对应开关，其他用 `EXTRA_URL_ARGS`）。
+> 判据、证据与核对命令见 [FAQ 21](#21-env-里-pve--伤害数值--难度改了没反应--服务端把-ini-重写了)。
 
 ---
 
@@ -843,6 +857,73 @@ docker compose build
 
 > 构建成功后这两个变量就可以关掉，容器运行时用的是 `.env` 里那一组，互不干扰。
 > 端口按你自己的代理软件填（Clash Verge 默认 7897）。
+
+**情况 C：WSL 里跑的是「原生 dockerd」（本项目当前的部署方式）**
+
+Docker Desktop 已经不在本机时，`docker` 命令来自 WSL 发行版里自己装的引擎
+（`systemctl status docker` 能查到，单元文件是 `/usr/lib/systemd/system/docker.service`）。
+它的出口是 **WSL 的网卡**，和 Windows 上的「系统代理」开关**没有任何关系** ——
+系统代理只改 Windows 的 WinINET 设置，不会让 WSL 的流量走代理。
+
+于是会出现：浏览器能打开网页、容器里 `curl steamcommunity.com` 也返回 200，
+但一构建就：
+
+```
+ERROR: failed to resolve source metadata for docker.io/docker/dockerfile:1:
+  Head "https://registry-1.docker.io/v2/docker/dockerfile/manifests/1":
+  read tcp 192.168.10.10:xxxxx->3.224.185.45:443: read: connection reset by peer
+```
+
+`connection reset by peer` = 到 Docker Hub 的连接被重置，就是这一步过不去。
+
+修法是**给 WSL 里的 dockerd 配加速器**（Docker Desktop 的图形界面这里没有，
+直接写 JSON 文件）：
+
+```bash
+# 在 WSL 里执行
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
+{
+  "registry-mirrors": [
+    "https://docker.xuanyuan.me",
+    "https://docker.1ms.run",
+    "https://docker.m.daocloud.io"
+  ]
+}
+EOF
+sudo systemctl restart docker
+docker info | grep -A3 "Registry Mirrors"      # 复查
+docker pull debian:12-slim                     # 能拉下来 == 通了
+docker compose build
+```
+
+> ⚠ `restart docker` 会让**所有容器**收到 SIGTERM。本项目 entrypoint 会先做一次
+> 优雅停服（保存世界），稍等即可；重启完记得 `docker compose up -d` 把服务器拉起来。
+
+**兜底做法：只改了 entrypoint.sh 时，可以走「增量构建」**
+
+如果本次改动**只涉及 `entrypoint.sh`**（Dockerfile 里其余层一个字节都没变），
+可以跳过基础镜像、用现有镜像做一次等价构建，先让修复生效：
+
+```bash
+# 临时补丁 Dockerfile（放在仓库外，别提交）
+cat > /tmp/ark-patch.Dockerfile <<'EOF'
+FROM ark-ase-server:latest
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh \
+ && chmod +x /usr/local/bin/entrypoint.sh \
+ && ln -sf /usr/local/bin/entrypoint.sh /usr/local/bin/ark-server
+EOF
+
+docker build -f /tmp/ark-patch.Dockerfile -t ark-ase-server:latest .
+docker compose up -d --force-recreate
+```
+
+- 得到的结果与一次干净重建在**文件系统上完全一致**（只换了那一个文件）；
+- 但镜像的来源链会变成「旧镜像 + 补丁」，**网络恢复后务必再跑一次**
+  `docker compose build`（或 `docker compose up -d --build`）回到正规流程；
+- Dockerfile 里为什么不该写 `# syntax=docker/dockerfile:1`：上面这个补丁文件**故意不写**
+  它，否则 BuildKit 又要去拉 `docker/dockerfile` 前端镜像，等于没绕开。
 
 ### 15. 自检通过、容器也能正常写文件，但 SteamCMD 仍报 `Missing file permissions`
 
@@ -1307,6 +1388,109 @@ WSL 不会因为空闲被回收，关掉所有终端、关掉窗口都不影响�
 代价是 WSL 会常驻内存（`vmmemWSL` 一直占着）。如果你更想要「不用时自动释放内存」，
 就把这两行删掉 —— 但那样服务端会在最后一个终端关闭约 1 分钟后被停掉，下次要等 2~3 分钟启动。
 「不用挂终端」和「不常驻内存」是互斥的，按你的使用习惯取舍。
+
+---
+
+### 21. `.env` 里 PVE / 伤害数值 / 难度改了没反应 —— 服务端把 ini 重写了
+
+**现象**（三个症状其实是同一个根因）
+
+- `SERVER_PVE=true`，进游戏却还是 PvP：玩家之间能互相打死，死后出现 **PvP 才有的「重生倒计时」**
+- `SHOW_FLOATING_DAMAGE_TEXT=true`，命中目标却**不飘伤害数字**
+- `OVERRIDE_OFFICIAL_DIFFICULTY=5.0`（本意是开 150 级野生生物），实际野生生物等级上不去
+
+**真因：服务端启动时会用它内置的默认模板，把 `GameUserSettings.ini` 整体重写一遍。**
+
+不是我们的合并逻辑写错了 —— 入口脚本确实把键写进去了，是**服务端在启动后把它换掉了**。
+一个命令就能看到这个「掉包」：
+
+```bash
+# ① 入口脚本写的配置（启动前的备份）：1264 字节，ServerPVE=True 明明在里面
+docker exec ark-server ls -la /backup/config/ | grep GameUserSettings
+docker exec ark-server cat /backup/config/GameUserSettings.ini.20260913-213712.bak
+
+# ② 服务端启动后实际生效的文件：33034 字节，换成了它自己的默认模板
+docker exec ark-server ls -la /ark/ShooterGame/Saved/Config/LinuxServer/
+docker exec -u root ark-server iconv -f UTF-16LE -t UTF-8 \
+  /ark/ShooterGame/Saved/Config/LinuxServer/GameUserSettings.ini | head -40
+```
+
+对比结果：
+
+| | 入口脚本写的 | 服务端重写后 |
+| --- | --- | --- |
+| `ServerPVE=True` | ✅ 有 | ❌ **消失** |
+| `ShowFloatingDamageText=True` | ✅ 有 | ❌ **消失** |
+| `OverrideOfficialDifficulty=5.0` | ✅ 有 | ❌ **消失** |
+| `DifficultyOffset=1.0` | ✅ 有 | ❌ **消失** |
+| `ShowAnniversaryContent` / `TheMaxStructuresInRange=10500` / `MaxTamedDinos=5000` | ❌ 我们没有 | ✅ 出现（模板默认键）|
+
+> ⚠ 这个文件是 **UTF-16LE** 编码、属主 root 且权限 `-rw-------`，直接 `cat` 是乱码或 Permission denied，
+> 必须 `docker exec -u root ark-server iconv -f UTF-16LE -t UTF-8 <路径>` 这样读。
+
+**判定规则：哪些键写 ini 有用**
+
+| 键的类型 | 写 ini | 典型键 |
+| --- | --- | --- |
+| 服务端绑定为 config 属性 | ✅ 会读，且会被回写保留 | `ServerCrosshair`、`AllowThirdPersonPlayer`、`ShowMapPlayerLocation`、`AllowHitMarkers`、`AutoSavePeriodMinutes`、`RCONEnabled`、`ServerAdminPassword` |
+| **会话级选项** | ❌ 重写时整行丢掉，等于没写 | `ServerPVE`、`ServerHardcore`、`ShowFloatingDamageText`、`DifficultyOffset`、`OverrideOfficialDifficulty`、`AllowFlyerCarryPvE`、`DisableStructureDecayPvE` |
+| 倍率类 | ⚠️ 可靠位置是 `Game.ini` 的 `[/script/shootergame.shootergamemode]` | `TamingSpeedMultiplier`、`HarvestAmountMultiplier` 等 |
+
+**结论：这一类键唯一的可靠入口是启动命令行。**
+
+**修复（当前版本已内置）**：入口脚本会把上表第二类键自动拼进启动 URL。核对：
+
+```bash
+docker exec ark-server ps -eo args | tr '?' '\n' | grep -E 'ServerPVE|Floating|Difficulty'
+# 期望看到：
+#   ServerPVE=True
+#   ShowFloatingDamageText=true
+#   DifficultyOffset=1.0
+#   OverrideOfficialDifficulty=5.0
+```
+
+启动日志里的汇总也会直接写出来，不用猜：
+
+```
+ 游戏模式        : PvE（玩家/建筑之间不可互相伤害）
+ 伤害数值显示    : 开（命中时飘伤害数字）
+ 难度            : 偏移 1.0 × 覆盖 5.0
+```
+
+> ⚠ `ShowFloatingDamageText` 的**值必须是小写 `true`** —— 社区多次实测写成 `True` 会失效，
+> 脚本里已按小写拼。数值型（`DifficultyOffset`）不带引号。
+
+**想再加别的命令行设置**：用 `.env` 里的 `EXTRA_URL_ARGS`，不用改代码、不用重建镜像：
+
+```env
+# 多个参数用 ? 或 & 分隔，开头带不带 ? 都行
+EXTRA_URL_ARGS=ForceAllowCaveFlyers=true?bDisableFriendlyFire=true
+```
+
+改完**必须重建容器**（环境变量在容器创建时固化）：
+
+```bash
+docker compose up -d --force-recreate
+```
+
+**为什么不要往 `config/GameUserSettings.ini.extra` 里写这些键**：合并本身没问题
+（见[第六章](#六进阶直接改-ini)），问题是服务端启动时会把这个文件整体重写，
+这些键活不过一次启动 —— 表现就是「写进去当天有效、重启又失效」这种更难查的状态。
+
+**这次修复带来的两个连带变化**，提前说一下免得被吓到：
+
+1. **重生倒计时会消失。** 那是 PvP 的「重复死亡重生惩罚」（每次死亡翻倍，默认 60 秒起），
+   只在 PvP 下生效。切到 PvE 后自然不再触发，不需要额外配置。
+2. **野生生物等级会按 `.env` 真正生效。** `DIFFICULTY_OFFSET=1.0` × `OVERRIDE_OFFICIAL_DIFFICULTY=5.0`
+   的含义就是「野生生物最高 150 级」（这是本项目的原始设计意图，之前一直被丢弃没生效）。
+   要保持低难度，把 `OVERRIDE_OFFICIAL_DIFFICULTY` 调回 `1` 即可。
+
+> **顺带记一笔（未修，待确认）**：同一份被重写的文件里，`XPMultiplier`、`LootQualityMultiplier`、
+> `DinoCountMultiplier`、`CropGrowthSpeedMultiplier`、`HarvestHealthMultiplier`、
+> `ItemWeightMultiplier`、`PlayerCharacterFoodDrainMultiplier` 等**只写在 `GameUserSettings.ini`
+> 里的倍率也一并被丢掉了**，即它们目前多半没有生效。这些键的可靠位置同样是
+> `Game.ini` 的 `[/script/shootergame.shootergamemode]`。要动的话属于玩平衡调整，
+> 别在没确认前一次性全开（尤其 `DINO_COUNT_MULTIPLIER=10`，会明显吃性能）。
 
 ---
 

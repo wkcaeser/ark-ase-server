@@ -1,0 +1,19 @@
+﻿
+=== 本次日志是否已写入 Commandline ===
+-rw------- 1 root root 0 Sep 14 00:30 /ark/ShooterGame/Saved/Logs/ShooterGame.log
+
+
+=== git status ===
+ M .env.example
+ M Dockerfile
+ M README.md
+ M config/GameUserSettings.ini.extra.example
+ M entrypoint.sh
+?? _probe.sh
+?? _probe.txt
+
+=== git log -1 ===
+7a277a2 feat: 容器改为手动启动（restart: "no"），并补充自启行为说明
+f7c2992 docs: 补充 WSL2 mirrored 网络模式与连接地址说明
+e1618e7 fix: 修复 WSL2 空闲回收导致服务端被反复重启，并修正健康检查自匹配
+

@@ -8,20 +8,24 @@
 ;       所以这里只需要写「要改的那几行」，不必照抄整份配置。
 ;
 ;  改动后执行：docker compose up -d  （或 docker compose run --rm ark render）
+;
+;  ⚠⚠ 重要：这份文件【不是万能的】，注意有一类键写这里没用（详见 README FAQ 21）
+;     服务端启动时会用内置默认模板整体重写 GameUserSettings.ini，只保留它自己
+;     绑定为 config 属性的键。下面这些【会话级】选项不在其中，写在这里会被丢掉，
+;     必须走命令行 —— 用 .env 的 EXTRA_URL_ARGS：
+;       ServerPVE / ServerHardcore / ShowFloatingDamageText / DifficultyOffset /
+;       OverrideOfficialDifficulty / AllowFlyerCarryPvE / DisableStructureDecayPvE
+;     例：EXTRA_URL_ARGS=ForceAllowCaveFlyers=true
 ; ============================================================================
 
 [ServerSettings]
 ; 例：死亡不掉落物品
 ; ItemStatClamps=0
-; 例：允许飞行生物被其他飞行生物抓取
-; AllowFlyerCarryPvE=True
-; 例：关闭 PvE 炮塔对野生生物的伤害
+; 例：关闭友军伤害（PvE 服常用）
 ; bDisableFriendlyFire=True
 ; 例：3 倍经验（与 .env 冲突时，以本文件为准）
 ; XPMultiplier=3
-; 例：服务器公告（玩家进服可见）
-; Message=欢迎来到本服，加群 XXX 领取新手礼包
-; 例：关闭结构衰减
+; 例：关闭结构衰减 —— ⚠ 这类键服务端不从 ini 读，见文件头说明，改用 EXTRA_URL_ARGS
 ; DisableStructureDecayPvE=True
 
 [/Script/Engine.GameSession]

@@ -89,8 +89,11 @@ WORKDIR ${ARK_SERVER_DIR}
 VOLUME ["${ARK_SERVER_DIR}", "${BACKUP_DIR}"]
 
 # 首次启动需要下载服务端+模组，start-period 给足时间
+# 注意模式写成 [S]hooterGameServer：若直接写 ShooterGameServer，pgrep -f 会匹配到
+# 执行本命令的 `sh -c "pgrep -f ShooterGameServer ..."` 自身，永远返回 0 ——
+# 服务端没起来也会被判定成 healthy。
 HEALTHCHECK --interval=60s --timeout=10s --start-period=20m --retries=3 \
-  CMD pgrep -f ShooterGameServer >/dev/null 2>&1 || exit 1
+  CMD pgrep -f '[S]hooterGameServer' >/dev/null 2>&1 || exit 1
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["start"]

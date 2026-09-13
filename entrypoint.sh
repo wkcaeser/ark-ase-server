@@ -186,7 +186,12 @@ MODS="${MODS:-}"                                     # 完全自定义：设置�
 CLUSTER_ID="${CLUSTER_ID:-}"
 CLUSTER_DIR_OVERRIDE="${CLUSTER_DIR_OVERRIDE:-${ARK_SERVER_DIR}/ShooterGame/Saved/clusters}"
 ALT_SAVE_DIR_NAME="${ALT_SAVE_DIR_NAME:-}"
-EXTRA_ARGS="${EXTRA_ARGS:-}"                         # 追加任意启动参数
+EXTRA_ARGS="${EXTRA_ARGS:-}"                         # 追加任意启动参数（原样追加在最后）
+# 追加 URL 参数：形如 `Key=Value`，多个用 ? 或 & 分隔，会被拼进地图 URL 里。
+# 为什么需要它：本版 ASE 服务端只认命令行上的这些「会话级」设置，写进
+# GameUserSettings.ini 会被它在启动时重写时丢弃（详见 launch_server 里的注释）。
+# 例：EXTRA_URL_ARGS=ForceAllowCaveFlyers=true?bDisableFriendlyFire=true
+EXTRA_URL_ARGS="${EXTRA_URL_ARGS:-}"
 
 SERVER_PID=""
 ACTIVE_MODS=""
@@ -925,6 +930,9 @@ print_summary() {
  RCON            : $(is_true "$RCON_ENABLED" && echo "${RCON_PORT}/TCP 已启用" || echo "已关闭")
  服务器密码      : $([ -n "$SERVER_PASSWORD" ] && echo "已设置" || echo "无（公开）")
  管理员密码      : $([ -n "$SERVER_ADMIN_PASSWORD" ] && echo "已设置" || echo "⚠ 未设置，无法使用管理员指令")
+ 游戏模式        : $(is_true "$SERVER_PVE" && echo "PvE（玩家/建筑之间不可互相伤害）" || echo "PvP")
+ 伤害数值显示    : $(is_true "$SHOW_FLOATING_DAMAGE_TEXT" && echo "开（命中时飘伤害数字）" || echo "关")
+ 难度            : 偏移 ${DIFFICULTY_OFFSET} × 覆盖 ${OVERRIDE_OFFICIAL_DIFFICULTY}
  模组数量        : ${#ACTIVE_MOD_ARRAY[@]}
  模组列表        : ${ACTIVE_MODS:-无}
  负重(玩家/恐龙) : ${PLAYER_WEIGHT_PER_LEVEL_MULTIPLIER} / ${DINO_WEIGHT_PER_LEVEL_MULTIPLIER} 倍（每级）
@@ -974,6 +982,44 @@ launch_server() {
   [ -n "$SERVER_ADMIN_PASSWORD" ] && url+="?ServerAdminPassword=${SERVER_ADMIN_PASSWORD}"
   is_true "$RCON_ENABLED" && url+="?RCONEnabled=True?RCONPort=${RCON_PORT}"
   [ -n "$ALT_SAVE_DIR_NAME" ] && url+="?AltSaveDirectoryName=${ALT_SAVE_DIR_NAME}"
+
+  # ---------------------------------------------------------------------------
+  # 玩法开关：必须拼在命令行上，写 ini 是【无效】的
+  #
+  # ⚠⚠ 这是踩过坑之后才搞明白的一条硬规则，别再把这些挪回 ini：
+  #   ASE 服务端启动时，会用内置的默认模板【整体重写】GameUserSettings.ini，
+  #   只保留它自己绑定为 config 属性的键（ServerCrosshair、AllowThirdPersonPlayer、
+  #   ShowMapPlayerLocation、AllowHitMarkers、AutoSavePeriodMinutes、RCON*、
+  #   ServerAdminPassword 等 —— 这些我们仍写在 ini 里，作为兜底）。
+  #   而 ServerPVE / ServerHardcore / ShowFloatingDamageText / DifficultyOffset /
+  #   OverrideOfficialDifficulty / AllowFlyerCarryPvE / DisableStructureDecayPvE
+  #   这些【会话级】选项不在其中，重写时会被整行丢掉。
+  #
+  #   实测证据（2026-09-13）：启动前 GameUserSettings.ini 里确实写着 ServerPVE=True，
+  #   服务端起来后该行消失、文件被换成 33 KB 的默认模板，游戏里仍是 PvP
+  #   （死亡后出现 PvP 重复死亡的重生倒计时）；同理 ShowFloatingDamageText 丢失
+  #   → 游戏内不显示伤害数值，OverrideOfficialDifficulty=5.0 丢失
+  #   → 野生生物等级上不去。
+  #   → 结论：这些设置唯一的可靠入口是命令行 URL，ini 里那几行只是摆设。
+  #
+  #   大小写有讲究：ShowFloatingDamageText 社区实测必须是小写 true，
+  #   写成 True 有概率不生效；其余沿用 ARK 惯用的 True/False。
+  # ---------------------------------------------------------------------------
+  url+="?ServerPVE=$(is_true "$SERVER_PVE" && echo True || echo False)"
+  url+="?ServerHardcore=$(is_true "$SERVER_HARDCORE" && echo True || echo False)"
+  url+="?ShowFloatingDamageText=$(is_true "$SHOW_FLOATING_DAMAGE_TEXT" && echo true || echo false)"
+  url+="?AllowHitMarkers=$(is_true "$ALLOW_HIT_MARKERS" && echo True || echo False)"
+  url+="?AllowFlyerCarryPvE=$(is_true "$ALLOW_FLYER_CARRY_PVE" && echo True || echo False)"
+  url+="?DisableStructureDecayPvE=$(is_true "$DISABLE_STRUCTURE_DECAY_PVE" && echo True || echo False)"
+  url+="?DifficultyOffset=${DIFFICULTY_OFFSET}"
+  url+="?OverrideOfficialDifficulty=${OVERRIDE_OFFICIAL_DIFFICULTY}"
+  # 兜底逃生口：想加别的命令行设置（且不想重建镜像）时用 .env 的 EXTRA_URL_ARGS
+  if [ -n "$EXTRA_URL_ARGS" ]; then
+    local _extra_url="$EXTRA_URL_ARGS"
+    _extra_url="${_extra_url#\?}"   # 开头带 ? 或 & 都容错
+    _extra_url="${_extra_url#&}"
+    [ -n "$_extra_url" ] && url+="?${_extra_url}"
+  fi
 
   local -a args=("$url" "-server" "-log" "-automanagedmods")
   [ -n "$ACTIVE_MODS" ] && args+=("-mods=${ACTIVE_MODS}")
