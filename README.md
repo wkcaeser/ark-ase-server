@@ -276,6 +276,8 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=1404697612
 | `STOP_TIMEOUT` | `90` | 停机时等待世界保存的秒数 |
 | `SKIP_INSTALL_ON_START` | `false` | `true`=启动时完全不执行 SteamCMD（离线环境） |
 | `STEAMCMD_RETRIES` | `3` | SteamCMD 失败重试次数 |
+| `STEAM_USER` | 空 | Steam 账号；留空=匿名登录。通常不需要，仅在容器/网络都确认干净、匿名确实被挡时才试（见 FAQ 15 修复四） |
+| `STEAM_PASS` | 空 | 上面的密码；日志里会自动打码成 `***`。**别把 `.env` 提交进 git** |
 
 ### 5. 集群（多地图互通，可选）
 
@@ -495,22 +497,42 @@ docker compose logs -f       # 确认识别到了新的倍率与模组
 
 ### 2. SteamCMD 下载慢或失败
 
-Steam 在国内公网经常抽风，给 Docker 配代理是最有效的办法。
+**先别急着配代理 —— 先确认你现在的出口是什么样。**
 
-**方式一（本项目内置，推荐）：填 `.env` 里的代理变量**
+如果宿主机开着代理软件的 **TUN 模式 / 全局模式**（Clash、Surge、v2rayN…），
+WSL 与容器的出网流量已经被整体接管，**这时再配一层容器代理不是加速而是打架**：
+TUN 的 fake-ip 会把 `host.docker.internal` 解析成 `198.18.x.x` 之类的假地址，
+容器连不过去，SteamCMD 会卡在 `Connecting anonymously to Steam Public...Retrying...`
+无限重试。判据很简单：**配了代理反而比不配更差 ⇒ 清空它。**
+
+**方式一（本项目内置）：填 `.env` 里的代理变量**
 
 ```env
-HTTP_PROXY=http://host.docker.internal:7890
-HTTPS_PROXY=http://host.docker.internal:7890
-NO_PROXY=localhost,127.0.0.1
+PROXY_HTTP=http://host.docker.internal:7897
+PROXY_HTTPS=http://host.docker.internal:7897
+PROXY_NO=localhost,127.0.0.1,host.docker.internal
 ```
 
-改完 `docker compose up -d` 即可，**不用重启 Docker**。
+改完必须**重建容器**：`docker compose up -d --force-recreate`（**不用重启 Docker**）。
 
-> ⚠ 两个常见的坑：
-> 1. 代理跑在宿主机（Windows/WSL）上时，容器里的 `127.0.0.1` 指的是**容器自己**，
->    写了也连不上，必须用 `host.docker.internal`（或宿主机内网 IP）。
-> 2. 代理软件要打开「允许局域网连接 / Allow LAN」，否则宿主机之外连不进来。
+> ⚠ **变量名是 `PROXY_*`，不是 `HTTP_PROXY`。** 这不是笔误：`docker compose` 插值的优先级是
+> **「宿主机 shell 环境 > `.env`」**，若直接叫 `HTTP_PROXY`，宿主机上只要存在同名变量
+> （Windows 系统代理、Clash 的「系统代理」开关等）就会盖掉 `.env`，把宿主机那份代理
+> 塞进容器。容器里最终生效的仍是标准名 `HTTP_PROXY` / `http_proxy`，无需在别处改动。
+
+> ⚠ 四个常见的坑：
+> 1. **端口别想当然**：Clash Verge 的 HTTP/SOCKS 混合端口默认是 **7897**（老版本才是 7890）。
+>    填错 = 代理等于没配，还会把本来通的直连一起弄坏。
+> 2. 代理跑在宿主机（Windows/WSL）上时，容器里的 `127.0.0.1` 指的是**容器自己**，
+>    写了也连不上，必须用 `host.docker.internal`（compose 已加 `host-gateway` 声明）。
+> 3. 代理软件要打开「允许局域网连接 / Allow LAN」，否则宿主机之外连不进来。
+> 4. **改完 `.env` 必须 `--force-recreate` 重建容器**：环境变量在容器创建时固化，
+>    `docker compose restart` 和 restart 策略的自动重启都**不会**重读 `.env`。
+>    只重启不重建 = 改了等于没改（这是本项目最隐蔽的坑，详见 FAQ 15 判据三）。
+>
+> ⚠ 还有一层：**代理配错或不可达时，会把本来能装的应用弄成装不上** —— SteamCMD 下载链路
+> 走不通，对外只报一句 `Missing file permissions`。这种情形详见
+> [FAQ 15](#15-自检通过容器也能正常写文件但-steamcmd-仍报-missing-file-permissions)。
 
 **方式二：给整个 Docker 守护进程配代理**（只适用于 **WSL 里原生安装的 docker**）
 
@@ -723,7 +745,7 @@ failed to solve: failed to do request:
 | 阶段 | 谁发起的请求 | 该在哪里配代理 / 加速 |
 | --- | --- | --- |
 | **构建**：拉 `debian:12-slim`、`apt-get`、下载 SteamCMD | Docker 引擎 + BuildKit | 引擎级：Docker Desktop 的 Proxies / Docker Engine JSON |
-| **运行**：SteamCMD 下服务端与模组、服务端联网 | 容器里的进程 | `.env` 的 `HTTP_PROXY` / `HTTPS_PROXY` |
+| **运行**：SteamCMD 下服务端与模组、服务端联网 | 容器里的进程 | `.env` 的 `PROXY_HTTP` / `PROXY_HTTPS` |
 
 你现在卡在**构建层**，所以要在引擎上动手。
 
@@ -781,54 +803,149 @@ docker compose up -d --build
 
 ```bash
 # bash（Windows Git Bash / WSL / Linux）
-HTTP_PROXY=http://host.docker.internal:7890 \
-HTTPS_PROXY=http://host.docker.internal:7890 \
+HTTP_PROXY=http://host.docker.internal:7897 \
+HTTPS_PROXY=http://host.docker.internal:7897 \
 docker compose build
 ```
 
 ```powershell
 # Windows PowerShell
-$env:HTTP_PROXY="http://host.docker.internal:7890"
-$env:HTTPS_PROXY="http://host.docker.internal:7890"
+$env:HTTP_PROXY="http://host.docker.internal:7897"
+$env:HTTPS_PROXY="http://host.docker.internal:7897"
 docker compose build
 ```
 
 > 构建成功后这两个变量就可以关掉，容器运行时用的是 `.env` 里那一组，互不干扰。
+> 端口按你自己的代理软件填（Clash Verge 默认 7897）。
 
 ### 15. 自检通过、容器也能正常写文件，但 SteamCMD 仍报 `Missing file permissions`
 
-这是最容易把人带偏的一种情况。先说结论：**这句话有两个完全不同的成因，别默认是"权限"。**
+这是最容易把人带偏的一种情况。先说结论：**这句话不是操作系统的权限错误**，
+按判据查清是哪一类，再对症处理。
 
 | 成因 | 判据 | 怎么办 |
 | --- | --- | --- |
-| ① 数据目录在 Windows/网络挂载上，`chmod` 不生效 | 启动日志里**没有**「数据目录自检通过」，或自检直接报错退出 | [FAQ 13](#13-日志刷-error-failed-to-install-app-376030-missing-file-permissions) |
-| ② **与 Steam 的连接不稳**（国内公网主因） | 启动日志里**有**「数据目录自检通过（/ark，文件系统 ext2/ext3）」 | 给容器配代理，[FAQ 2](#2-steamcmd-下载慢或失败) |
+| ① **容器里挂着代理，但代理不通 / 端口写错**（实测命中率最高） | 容器内 `HTTP_PROXY` 有值（尤其 `.env` 里 `PROXY_HTTP` 却是空的） | 见下「修复一」 |
+| ② 数据目录在 Windows/网络挂载上，`chmod` 不生效 | 启动日志里**没有**「数据目录自检通过」，或自检直接报错退出 | [FAQ 13](#13-日志刷-error-failed-to-install-app-376030-missing-file-permissions) |
+| ③ 确实连不上 Steam（无代理也一样） | 日志里大面积 `Retrying...` / `No Connection` / `Timed out`，连 `Connecting anonymously...` 都过不去 | 先修网络，再谈安装 |
+| ④ 容器运行时细节（以 root 跑 SteamCMD / 隔离策略 / 内核） | 官方 `cm2network/steamcmd` 镜像**也失败** ⇒ 属环境层；**它成功而你失败** ⇒ 属本镜像 | 见下「修复五」隔离矩阵 |
 
-**怎么一眼认出是 ②**
+**判据一：先确认失败卡在哪一步**
 
-- 启动日志里有 `[信息] 数据目录自检通过（/ark，文件系统 ext2/ext3）`（`ext2/ext3` 就是 ext4 的
-  探测结果）。这是前提——说明目录真的可写，容器也确实成功往 `/ark` 写了
-  `GameUserSettings.ini` / `Game.ini`。
-- SteamCMD 自己的日志里，**报错文案会在 `Missing file permissions` 和 `Missing configuration`
-  之间来回变**。同一套环境、每次报的不一样 → 不是权限这种确定性问题，是连接在抖。
-- `Waiting for user info...` 之后要等十几秒甚至几十秒才 `OK`（正常是 1~3 秒），
-  同一时段还会夹杂 `No Connection` / `Retrying...`。
-- **`/ark/steamapps` 始终没被创建**，也不存在 `content_log.txt` ——
-  说明安装连"开始下载"都没走到，是被 Steam 侧卡住的，而不是被文件系统拒绝。
+去 `data/steamcmd/linux32/logs/console_log.txt` 看每个会话的结尾。**决定性的一条是：
+`Waiting for user info...OK` 之后有没有 `Update state (0x...)`。**
 
-上面任意一条成立，就不要再折腾目录权限了。
+- **没有** `Update state`，直接就 `ERROR! Failed to install app ...` →
+  连「建立更新任务」这一步都没成功（还没拿到内容服务器配置），**与文件权限无关**。
+- **有** `Update state` 才进入下载/校验；此时再失败才可能是磁盘、权限这类本地问题。
 
-**修复一：给容器配代理（最有效）**
+**判据二：`Missing file permissions` 这个字符串的真实含义**
 
-`.env`：
+它**不是操作系统的权限错误**，而是 Steam 自己的「应用更新错误」枚举文本
+（SteamCMD 进程退出码实测就是 **8**）：
 
-```env
-HTTP_PROXY=http://host.docker.internal:7890
-HTTPS_PROXY=http://host.docker.internal:7890
+| 字符串 | 大致含义 |
+| --- | --- |
+| `Missing configuration` | 拿不到该 App 的安装配置（depot / 更新计划） |
+| `Missing file permissions` | 更新计划构建失败，被归到这一类；**与 chmod 无关** |
+
+同族还有 `No subscription`（账号没有许可）等。共同点是：**它们说的是 Steam 侧的态度，
+不是本地文件系统。** 所以看到这句话，第一个该怀疑的不是 `chmod`，而是
+**这一路请求为什么没走通**。
+
+**判据三：先看「代理」这一行 —— 实测最常见的真因**
+
+项目在启动日志和 `doctor` 里都会打印容器内的 `HTTP_PROXY`，并且同时打印 `.env` 的原始意图
+（`PROXY_HTTP`）。**只要容器里还有代理值，就先怀疑它**：代理端口写错
+（Clash Verge 默认 **7897**，不是 7890）或代理不可达时，SteamCMD 的下载链路走不通，
+对外就报成 `Missing file permissions` / `Missing configuration`。
+
+这里有个**最隐蔽的坑**：**环境变量在容器「创建」时固化**，`docker compose restart`
+和 `restart: unless-stopped` 的自动重启**都不会重读 `.env`**。于是会出现：
+
+> `.env` 里代理明明清空了，容器里却还挂着旧代理 → 你会觉得「怎么改都没用」。
+
+一条命令看出真相：
+
+```bash
+docker exec ark-server sh -c 'env | grep -i proxy'
 ```
 
-端口换成你自己代理的端口，确认代理软件开了「允许局域网连接 / Allow LAN」，然后
-`docker compose up -d`。⚠ 容器里的 `127.0.0.1` 指容器自己，一定写 `host.docker.internal`。
+- 输出为空 → 没有代理干扰，跳判据四。
+- 输出里有 `HTTP_PROXY=...`，而 `.env` 里 `PROXY_HTTP` 是空的
+  → **就是它**，重建容器即可：
+
+```bash
+docker compose up -d --force-recreate
+```
+
+`ark doctor` 会把这条直接点出来；容器启动时若检测到代理，日志里也会给同样的提示。
+
+**判据四（曾经误用，已证伪）：`app access token ... 0 received, N denied` 是正常现象**
+
+`data/steamcmd/Steam/logs/appinfo_log.txt` 里经常能看到：
+
+```
+Requested 67 app access tokens, 0 received, 67 denied
+```
+
+**这行不是故障判据。** 匿名会话本来就拿不到那 67 个 App 的 access token，
+而在下载**正常进行**的探测容器里，这行照样出现 —— 实测同一容器同时打印：
+
+```
+Requested 67 app access tokens, 0 received, 67 denied
+Update state (0x11) preallocating, progress: 88.67 (20340409257 / 22938933947)
+```
+
+即「令牌全拒」与「下载到 88%」并存。本项目早期文档曾把它当成根因，**已证伪**，
+请不要据此排查。（`doctor` 仍会把它打出来，但只作参考。）
+
+**修复一：让容器彻底不带代理（实测真因）**
+
+`.env` 里这一组留空即可 —— 注意变量名是 **`PROXY_*`**，不是 `HTTP_PROXY`：
+
+```env
+PROXY_HTTP=
+PROXY_HTTPS=
+PROXY_NO=
+```
+
+```bash
+docker compose up -d --force-recreate
+```
+
+> **为什么变量名不叫 `HTTP_PROXY`？** 因为 `docker compose` 做变量插值时，
+> 优先级是 **「宿主机 shell 环境 > `.env` 文件」**。若 compose 里直接写 `${HTTP_PROXY:-}`，
+> 那么宿主机（Windows 系统代理、Clash 的「系统代理」开关、WSL 的 `/etc/environment`）
+> 只要存在同名变量，就会**盖掉** `.env` 里的空值，把宿主机那份代理硬塞进容器 ——
+> 而且通常是错的端口。用 `PROXY_*` 这种专属名字可彻底切断这条泄漏路径。
+> 容器里最终生效的仍然是标准名 `HTTP_PROXY` / `http_proxy`，其它地方无需改动。
+
+**确实需要容器内代理时**（宿主机没有 TUN，就是想让容器单独走代理）：
+
+```env
+PROXY_HTTP=http://host.docker.internal:7897
+PROXY_HTTPS=http://host.docker.internal:7897
+```
+
+- ⚠ **端口别想当然**：Clash Verge 的 HTTP/SOCKS 混合端口默认是 **7897**（老版本才是 7890）。
+  填错端口 = 代理等于没配，还会把本来通的直连一起弄坏。
+- ⚠ 容器里的 `127.0.0.1` 指容器自己，一定写 `host.docker.internal`。
+  compose 已声明 `host.docker.internal:host-gateway` —— WSL 原生 dockerd **不会**自动提供
+  这个名字（只有 Docker Desktop 会），不声明就会被代理的 fake-ip 抢答成假地址。
+- ⚠ **只填大写这一组就行**：compose 会同时注入小写的 `http_proxy` / `https_proxy`。
+  这一步是必需的 —— curl 与 SteamCMD 内部的下载链路**只认小写变量名**，只配大写等于没走代理。
+- ⚠ **改完必须 `docker compose up -d --force-recreate`**，只 restart 不生效（见判据三）。
+- 验证：`docker compose run --rm ark doctor`，看代理变量与「Steam 侧连通性」。
+
+**宿主机开着 TUN / 全局模式时，这一层更要留空**
+
+TUN 的默认路由（metric 抢在物理网卡之前）已经把 WSL 与容器的出网整体接管。
+此时再叠一层代理只会打架：TUN 的 fake-ip 会把 `host.docker.internal` 解析成
+`198.18.x.x` 之类的假地址，容器根本连不过去，SteamCMD 会卡在
+`Connecting anonymously to Steam Public...Retrying...` 无限重试 —— **配了反而更差。**
+
+判据很简单：**配了代理比不配更差，就是这种情况，清空并重建即可。**
 
 **修复二：把 SteamCMD 整个重建一份**
 
@@ -840,15 +957,55 @@ mv "$HOME/ark-data/steamcmd" "$HOME/ark-data/steamcmd.bak"
 docker compose up -d --build      # 容器会重新下载一份干净的 SteamCMD
 ```
 
+**修复三：首次安装自动带 `validate`（项目已内置）**
+
+方舟 376030 的社区惯例是「第一次安装必须加 validate」。entrypoint 在检测到
+`<DATA_DIR>/server/steamapps` 不存在时会自动追加 `validate`，无需手动操作。
+需要强制全量校验时：`STEAM_VALIDATE=true docker compose run --rm ark install`。
+
+**修复四：改用真实 Steam 账号登录（兜底）**
+
+匿名路径在全球范围是通的（中文教程普遍用 `+login anonymous`），所以**先做修复一**。
+只有在确认容器/环境一切都干净、确实是匿名会话被 Steam 侧挡下时，才换成真实账号：
+
+```env
+STEAM_USER=你的账号
+STEAM_PASS=你的密码
+```
+
+- 建议专门建一个服务端小号；密码明文存在 `.env`，**别把 `.env` 提交进 git**。
+- 容器日志里会自动把密码替换成 `***`，不会泄漏到日志。
+
+**修复五：一轮隔离矩阵，把责任方钉死**
+
+```bash
+bash tools/diag-steamcmd.sh        # 可带代理参数：bash tools/diag-steamcmd.sh http://host.docker.internal:7897
+```
+
+| 组 | 变量 | 读法 |
+| --- | --- | --- |
+| **T0** | 小 AppID **1007**（对照组，最先跑） | **成功 ⇒ 网络、镜像、权限全部无罪**，重点回到容器配置（尤其代理） |
+| T2 | 我们的镜像 + 376030 | 复现故障 |
+| T1 | 官方 `cm2network/steamcmd` 镜像（非 root + 自有 HOME） | 成功 ⇒ 我们的镜像 / root 有问题；失败 ⇒ 环境或 Steam 侧 |
+| T3 | 我们的镜像 + 376030 + `@sSteamCmdForcePlatformType linux` | 成功 ⇒ 平台探测问题 |
+| T5 | 我们的镜像 + 376030 + 指定代理 | 只有当代理确实可用时才有意义 |
+
+> ⚠ 注意：`tools/diag-steamcmd.sh` 里的探测用的是 `docker run`，**不会带上 compose 的
+> `environment`**。所以它跑通、而 `docker compose` 起的主容器失败，这一点本身就是
+> 「问题出在容器环境变量（代理）」的强证据 —— 主容器多出来的正好是那一层代理。
+
+> Valve 官方文档明确写着 **不要在 root 用户下运行 SteamCMD**，主流服务端镜像也都用独立的
+> `steam` 用户。T1 就是为这条准备的对照 —— 它跑通，就说明该把镜像改成非 root 运行。
+
 **先跑自检，别再猜**
 
 ```bash
 docker compose run --rm ark doctor
 ```
 
-一次性打印身份、挂载点、文件系统类型、属主与权限、磁盘/inode 余量、代理变量、
-`steamapps` 是否创建、SteamCMD 日志清单。另外安装失败时，`docker compose logs` 里
-会**自动附带一版精简诊断**，可直接复制反馈。
+一次性打印身份、挂载点、文件系统类型、属主与权限、磁盘/inode 余量、**代理变量
+（含「是不是旧容器固化的」判定）**、`steamapps` 是否创建、SteamCMD 日志末尾。
+另外安装失败时，`docker compose logs` 里会**自动附带一版精简诊断**，可直接复制反馈。
 
 ---
 

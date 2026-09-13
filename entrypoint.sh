@@ -77,6 +77,16 @@ normalize_numbers() {
 # --------------------------- 路径与固定参数 ---------------------------------
 APP_ID="${APP_ID:-376030}"                    # ARK: Survival Evolved Dedicated Server
 WORKSHOP_APP_ID="${WORKSHOP_APP_ID:-346110}"  # ARK: Survival Evolved（创意工坊模组归属客户端）
+
+# Steam 登录方式：默认匿名（大多数专用服务端够用）。
+# 少数情况下 Steam 会**拒绝给匿名会话签发某个 App 的 access token**，此时 SteamCMD 报的
+# 却是 "Missing file permissions" / "Missing configuration"（见 README FAQ 15）。
+# 遇到这种情况就填一个真实 Steam 账号来绕开：
+#   STEAM_USER=你的账号   STEAM_PASS=你的密码
+# ⚠ 建议用专门建的小号，并注意密码会出现在 .env（记得别把它提交进 git）。
+STEAM_USER="${STEAM_USER:-}"
+STEAM_PASS="${STEAM_PASS:-}"
+
 ARK_SERVER_DIR="${ARK_SERVER_DIR:-/ark}"
 STEAMCMD_DIR="${STEAMCMD_DIR:-/opt/steamcmd}"
 STEAMCMD_PATH="${STEAMCMD_PATH:-${STEAMCMD_DIR}/steamcmd.sh}"
@@ -252,6 +262,25 @@ TIPS
   exit 1
 }
 
+# 代理自检：容器出网若被指定走代理，SteamCMD 的下载链路一旦走不通，对外只报
+# "Missing file permissions" / "Missing configuration"（完全与文件权限无关），极难自查。
+# 这里顺便识别本项目最隐蔽的一个坑：改完 .env 只 restart、没重建 —— 容器里的代理
+# 仍然是创建时固化的旧值，于是「怎么改 .env 都没用」。
+warn_if_proxy() {
+  local eff="${HTTP_PROXY:-${http_proxy:-}}"
+  [ -n "$eff" ] || return 0
+  warn "容器出网走代理：HTTP_PROXY=${eff}"
+  if [ -z "${PROXY_HTTP:-}" ] && [ -z "${PROXY_HTTPS:-}" ]; then
+    warn "  但 .env 里的 PROXY_HTTP / PROXY_HTTPS 是空的 → 容器里这个代理值是【创建时固化的旧值】。"
+    warn "  说明改完 .env 只 restart 过、没有重建。环境变量在容器创建时固化，"
+    warn "  docker compose restart 与 restart 策略的自动重启都不会重读 .env。执行："
+    warn "      docker compose up -d --force-recreate"
+  fi
+  warn "  ⚠ 端口写错（Clash Verge 默认 7897，不是 7890）或代理不可达时，SteamCMD 会报"
+  warn "    Missing file permissions / Missing configuration —— 那是代理问题，不是文件权限问题。"
+  warn "  ⚠ 宿主机开着 TUN / 全局模式时，这一层代理应留空：TUN 已接管容器出网，叠加只会打架。"
+}
+
 # SteamCMD 自检（若挂载卷里没有则自动补装）
 ensure_steamcmd() {
   if [ ! -x "$STEAMCMD_PATH" ]; then
@@ -302,11 +331,22 @@ locate_mod_src() {
   return 1
 }
 
+# 生成 +login 参数：默认匿名；填了 STEAM_USER 就走真实账号
+steam_login_args() {
+  if [ -n "$STEAM_USER" ] && [ "$STEAM_USER" != "anonymous" ]; then
+    printf '%s\n' "+login" "$STEAM_USER" "$STEAM_PASS"
+  else
+    printf '%s\n' "+login" "anonymous"
+  fi
+}
+
 # SteamCMD 执行包装（带重试）
 steamcmd_run() {
-  local attempt=1
+  local attempt=1 desc="$*"
+  # 用了真实账号时，别把密码打进日志
+  if [ -n "$STEAM_PASS" ]; then desc="${desc//"$STEAM_PASS"/***}"; fi
   while [ "$attempt" -le "$STEAMCMD_RETRIES" ]; do
-    log "SteamCMD 执行（第 ${attempt}/${STEAMCMD_RETRIES} 次）：$*"
+    log "SteamCMD 执行（第 ${attempt}/${STEAMCMD_RETRIES} 次）：${desc}"
     if "$STEAMCMD_PATH" "$@"; then
       return 0
     fi
@@ -336,6 +376,22 @@ dump_install_diag() {
   err  "  磁盘剩余      : $(df -h "$ARK_SERVER_DIR" 2>/dev/null | tail -n 1 || echo 未知)"
   err  "  steamapps     : $([ -d "${ARK_SERVER_DIR}/steamapps" ] && echo '已创建' || echo '未创建（安装没走到下载阶段，多半是 Steam 侧而非权限）')"
   err  "  代理          : HTTP_PROXY=${HTTP_PROXY:-（未设置）} HTTPS_PROXY=${HTTPS_PROXY:-（未设置）}"
+  if [ -n "${HTTP_PROXY:-}" ] && [ -z "${PROXY_HTTP:-}" ] && [ -z "${PROXY_HTTPS:-}" ]; then
+    err  "                  ↑ 但 .env 里 PROXY_HTTP/PROXY_HTTPS 为空 → 这是旧容器固化的代理值。"
+    err  "                    改完 .env 只 restart、没重建：docker compose up -d --force-recreate"
+  fi
+  err  "  登录方式      : $([ -n "$STEAM_USER" ] && [ "$STEAM_USER" != anonymous ] && echo "Steam 账号 ${STEAM_USER}" || echo '匿名（anonymous）')"
+  # 关于 app access token：匿名会话 0 received / N denied 是【正常现象】，
+  # 下载正常进行时也会出现，不能当作故障判据。这里只作参考输出。
+  local ailog="${STEAMCMD_DIR}/Steam/logs/appinfo_log.txt"
+  if [ -f "$ailog" ]; then
+    local denied
+    denied="$(grep -E 'app access tokens' "$ailog" 2>/dev/null | tail -n 2 || true)"
+    if [ -n "$denied" ]; then
+      err "  app access token（仅供参考，匿名会话 0 received/N denied 属正常）："
+      while IFS= read -r line; do err "    ${line}"; done <<< "$denied"
+    fi
+  fi
   local clog="${STEAMCMD_DIR}/linux32/logs/console_log.txt"
   if [ -f "$clog" ]; then
     err "  最近 SteamCMD 输出："
@@ -348,8 +404,20 @@ dump_install_diag() {
 install_server() {
   local -a args=()
   if is_true "$STEAM_VALIDATE"; then args+=(validate); fi
+  # 首次安装（还没有 steamapps）时自动带上 validate。方舟 376030 的社区惯例是
+  # 「第一次安装必须加 validate」：不带时部分网络环境下 SteamCMD 会在"建立更新任务"
+  # 阶段直接报 Missing file permissions / Missing configuration，一个字节都不下载。
+  if [ ! -d "${ARK_SERVER_DIR}/steamapps" ] && ! is_true "$STEAM_VALIDATE"; then
+    args+=(validate)
+    log "检测到首次安装（${ARK_SERVER_DIR}/steamapps 不存在），本次自动追加 validate"
+  fi
   log "安装/更新服务端（AppID=${APP_ID}）到 ${ARK_SERVER_DIR}"
-  if steamcmd_run +force_install_dir "$ARK_SERVER_DIR" +login anonymous \
+  local -a login_args=()
+  mapfile -t login_args < <(steam_login_args)
+  if [ -n "$STEAM_USER" ] && [ "$STEAM_USER" != "anonymous" ]; then
+    log "使用 Steam 账号 ${STEAM_USER} 登录（非匿名）"
+  fi
+  if steamcmd_run +force_install_dir "$ARK_SERVER_DIR" "${login_args[@]}" \
                   +app_update "$APP_ID" "${args[@]}" +quit; then
     ok "服务端就绪，buildid=$(server_version)"
     return 0
@@ -361,20 +429,46 @@ install_server() {
     return 0
   fi
   dump_install_diag
-  die "服务端安装失败。
+  die "服务端安装失败（对外报 Missing file permissions / Missing configuration）。
 
-  排查顺序（最常见的是第 2 条，不是第 1 条）：
-    1) 数据目录不在 Linux 文件系统上 —— 本容器启动时已自检，通过了就排除这条。
+  排查顺序（按命中概率从高到低）：
+
+    1) 容器里挂着代理，而且代理不通 / 端口写错 —— 实测最常见的真因。
+       SteamCMD 只是把「下载链路走不通」笼统报成了 Missing file permissions，
+       与文件权限、磁盘、挂载统统无关。看上面排障信息里的「代理」一行：
+         · 若显示了 HTTP_PROXY 但 .env 里 PROXY_HTTP/PROXY_HTTPS 是空的
+           → 这是【旧容器固化的值】，你改完 .env 只 restart 没重建。执行：
+                 docker compose up -d --force-recreate
+           （环境变量在容器创建时固化，restart 不重读 .env，这是最隐蔽的坑）
+         · 若确实要用代理：端口别写错，Clash Verge 默认是 7897（不是 7890）。
+               在 .env 里填（不是 HTTP_PROXY，名字必须用 PROXY_*）：
+                   PROXY_HTTP=http://host.docker.internal:7897
+                   PROXY_HTTPS=http://host.docker.internal:7897
+               然后 docker compose up -d --force-recreate
+         · 若宿主机开着 Clash / Surge 的 TUN 或全局模式：容器出网已被 TUN 整体接管，
+           这一层代理应当【留空】，叠加只会打架（TUN 的 fake-ip 会把
+           host.docker.internal 解析成 198.18.x.x，容器根本连不上代理端口，
+           表现是无限 'Connecting anonymously to Steam Public...Retrying...'）。
+       ⚠ 别把 app access token 的 '0 received, N denied' 当判据 —— 匿名会话本来就拿不到
+         那些令牌，下载正常时也会打印这行（已实测证伪）。
+
+    2) 换个登录方式 —— 用真实 Steam 账号替代匿名：
+           STEAM_USER=你的账号
+           STEAM_PASS=你的密码
+       （建议专门建个小号；密码只留在本机 .env）
+
+    3) 数据目录不在 Linux 文件系统上 —— 本容器启动时已自检，通过了就排除这条。
        （自检不通过会直接退出，不会走到这里）
-    2) 与 Steam 的连接不稳 —— 国内公网主因。SteamCMD 哪怕连不上也会照样报
-       Missing file permissions / Missing configuration，别被这句话带偏。
-       解决：在 .env 里给容器配代理后 docker compose up -d
-           HTTPS_PROXY=http://host.docker.internal:7890
-           （代理软件需开启「允许局域网连接 / Allow LAN」）
-    3) SteamCMD 自身状态损坏 —— 删掉缓存重建一份：
+
+    4) SteamCMD 自身状态损坏 —— 删掉缓存重建一份：
            docker compose down
            mv \$HOME/ark-data/steamcmd \$HOME/ark-data/steamcmd.bak
            docker compose up -d --build
+
+    5) 上面都无效 —— 跑隔离矩阵，把责任方钉死：
+           bash tools/diag-steamcmd.sh
+       它用官方 cm2network/steamcmd 镜像（非 root 用户）做对照。Valve 官方明确不建议
+       以 root 运行 SteamCMD；若官方镜像也失败，说明与本项目无关，属网络/Steam 侧。
 
   查看完整环境自检：docker compose run --rm ark doctor"
 }
@@ -446,7 +540,9 @@ install_mods() {
       log "模组 ${id} 已存在（${src}），MOD_UPDATE=false 跳过更新"
     else
       log "下载/更新模组 ${id} …（大型模组可能几百 MB ~ 数 GB，首次下载请耐心等待）"
-      steamcmd_run +login anonymous +workshop_download_item "$WORKSHOP_APP_ID" "$id" validate +quit \
+      local -a mod_login=()
+      mapfile -t mod_login < <(steam_login_args)
+      steamcmd_run "${mod_login[@]}" +workshop_download_item "$WORKSHOP_APP_ID" "$id" validate +quit \
         || warn "模组 ${id} 下载失败（可能是体积大导致网络超时、已下架或需要登录），稍后重试或改用 MODS 精简列表"
     fi
 
@@ -741,8 +837,7 @@ doctor() {
   echo "────────────────────────────────────────────────────────────"
   echo " 容器环境自检"
   echo "────────────────────────────────────────────────────────────"
-  echo "身份          : $(id 2>/dev/null || echo 未知)"
-  echo "HOME          : ${HOME:-未设置}"
+  echo "身份          : $(id 2>/dev/null || echo 未知)"  echo "HOME          : ${HOME:-未设置}"
   echo "内核          : $(uname -srm 2>/dev/null || echo 未知)"
   echo "目录挂载      :"
   for d in "$ARK_SERVER_DIR" "$STEAMCMD_DIR" "$BACKUP_DIR" "$USER_CONFIG_DIR"; do
@@ -757,6 +852,11 @@ doctor() {
   df -i "$ARK_SERVER_DIR" 2>/dev/null | sed 's/^/  /' || true
   echo "代理          : HTTP_PROXY=${HTTP_PROXY:-（未设置）}"
   echo "                HTTPS_PROXY=${HTTPS_PROXY:-（未设置）}  NO_PROXY=${NO_PROXY:-（未设置）}"
+  if [ -n "${HTTP_PROXY:-}" ]; then
+    echo "                ⚠ 容器出网走代理。若 .env 里 PROXY_HTTP/PROXY_HTTPS 已留空而这里仍有值，"
+    echo "                  说明容器没重建（只 restart、不重读 .env）→ docker compose up -d --force-recreate"
+    echo "                  代理端口写错或不可达时，SteamCMD 会报 Missing file permissions，与文件权限无关。"
+  fi
   echo "SteamCMD      : ${STEAMCMD_PATH} $([ -x "$STEAMCMD_PATH" ] && echo '(可执行)' || echo '(缺失或不可执行)')"
   echo "服务端        : $([ -x "$SERVER_BIN" ] && echo "已安装 buildid=$(server_version)" || echo '未安装')"
   echo "steamapps     : $([ -d "${ARK_SERVER_DIR}/steamapps" ] && echo '已创建' || echo '未创建 → 安装没走到下载阶段，问题在 Steam 侧而非文件权限')"
@@ -764,8 +864,49 @@ doctor() {
   ls -la "$ARK_SERVER_DIR" 2>/dev/null | sed 's/^/  /' | head -n 20 || true
   echo "SteamCMD 日志 : $(ls -1t "${STEAMCMD_DIR}/linux32/logs" 2>/dev/null | tr '\n' ' ' || echo '（无）')"
   echo "────────────────────────────────────────────────────────────"
-  echo " 提示：如果 check 全绿但 SteamCMD 仍报 Missing file permissions，"
-  echo "       那多半是 Steam 连通性问题，请给容器配代理后重试（见 README FAQ 2）。"
+  echo " Steam 侧连通性（反映能否取到 Steam 的内容服务器配置）"
+  local _u
+  for _u in https://steamcdn-a.akamaihd.net/ \
+            https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/ \
+            https://store.steampowered.com/; do
+    printf '  %-56s %s\n' "$_u" \
+      "$(curl -s -o /dev/null -m 8 -w 'http=%{http_code} 用时=%{time_total}s' "$_u" 2>/dev/null || echo '失败或超时')"
+  done
+  local _c="${STEAMCMD_DIR}/linux32/logs/console_log.txt"
+  if [ -f "$_c" ]; then
+    echo " console_log.txt 末尾（安装失败点就在这里）："
+    tail -n 8 "$_c" 2>/dev/null | sed 's/^/   /' || true
+  fi
+  local _f _p
+  for _f in appinfo_log configstore_log; do
+    _p="${STEAMCMD_DIR}/Steam/logs/${_f}.txt"
+    if [ -f "$_p" ]; then
+      echo " ${_f}.txt 末尾："
+      tail -n 3 "$_p" 2>/dev/null | sed 's/^/   /' || true
+    fi
+  done
+  # 关于 app access token：匿名会话拿不到大多数 App 的令牌，
+  # appinfo_log 里出现 "0 received, N denied" 是【正常现象】，下载照样能进行，
+  # 不要据它下判断。（曾经误把这条当根因，实测已证伪。）
+  local _ai="${STEAMCMD_DIR}/Steam/logs/appinfo_log.txt"
+  if [ -f "$_ai" ]; then
+    local _den
+    _den="$(grep -E 'app access tokens' "$_ai" 2>/dev/null | tail -n 2 || true)"
+    if [ -n "$_den" ]; then
+      echo " app access token（仅供参考：匿名会话 0 received/N denied 属正常，非故障判据）："
+      while IFS= read -r _l; do echo "   ${_l}"; done <<< "$_den"
+    fi
+  fi
+  echo "────────────────────────────────────────────────────────────"
+  echo "值：check 全绿却仍报 Missing file permissions / Missing configuration 时，"
+  echo "       看上面 console_log 末尾是否停在 'Waiting for user info...OK' —— 那说明卡在"
+  echo "       「取内容服务器配置 / 建立更新任务」，是链路问题而非文件权限。"
+  echo "       · 先看「代理」那一行：容器里若还挂着代理，就是它 —— 尤其 .env 已留空却仍有值"
+  echo "         （旧容器固化的），务必 docker compose up -d --force-recreate"
+  echo "       · app access token 那行的 0 received/N denied 是匿名会话的正常现象，别被它带偏"
+  echo "       · 确定要配容器内代理时，端口别写错（Clash Verge 默认 7897 而非 7890），"
+  echo "         且 compose 已声明 host.docker.internal:host-gateway，否则名字会被解析成假 IP。"
+  echo "       详细判定与矩阵：bash tools/diag-steamcmd.sh（见 README FAQ 15）"
   echo "────────────────────────────────────────────────────────────"
 }
 
@@ -870,6 +1011,7 @@ launch_server() {
 # =============================================================================
 do_start() {
   ensure_dirs
+  warn_if_proxy
   build_mod_list
   render_configs
 
@@ -893,9 +1035,9 @@ main() {
   case "$cmd" in
     start)   do_start ;;
     install|update)
-      ensure_dirs; build_mod_list; ensure_steamcmd; install_server; install_mods; ok "安装/更新完成" ;;
+      ensure_dirs; warn_if_proxy; build_mod_list; ensure_steamcmd; install_server; install_mods; ok "安装/更新完成" ;;
     install-mods|mods-install)
-      ensure_dirs; build_mod_list; ensure_steamcmd; install_mods; ok "模组处理完成" ;;
+      ensure_dirs; warn_if_proxy; build_mod_list; ensure_steamcmd; install_mods; ok "模组处理完成" ;;
     render)
       build_mod_list; render_configs ;;
     backup)  do_backup ;;

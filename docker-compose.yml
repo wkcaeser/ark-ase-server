@@ -30,14 +30,54 @@ services:
       - .env
     environment:
       TZ: Asia/Shanghai
-      # 代理：国内直连 Steam 不稳定时，在 .env 里填 HTTP_PROXY / HTTPS_PROXY / NO_PROXY。
+      # 代理：国内直连 Steam 不稳定时，在 .env 里填 PROXY_HTTP / PROXY_HTTPS / PROXY_NO。
       # ⚠ 这一组只作用于「容器运行时」——SteamCMD 下载服务端与模组、服务端本身联网。
       #   它对 docker build 完全无效（env_file 不参与构建），构建报错请看 README FAQ 14。
+      #
+      # ⚠⚠ 两边【刻意不同名】，这是踩过坑之后的设计，改之前请先读完：
+      #   docker compose 做变量插值时的优先级是「宿主机 shell 环境 > .env 文件」。
+      #   也就是说，如果这里直接写 ${HTTP_PROXY:-}，那么只要宿主机（Windows 系统代理、
+      #   Clash 的「系统代理」开关、WSL 的 /etc/environment 等）本来就导出过 HTTP_PROXY，
+      #   就会**盖掉** .env 里的空值，把宿主机的代理硬塞进容器 —— 而且通常是错的端口。
+      #   后果就是 SteamCMD 报 Missing file permissions / Missing configuration（见 README FAQ 15）。
+      #   用 PROXY_HTTP 这种专属名字，宿主机几乎不可能同名，.env 因此成为唯一权威来源。
+      #   （容器里最终看到的仍然是标准的 HTTP_PROXY / http_proxy，两者都注入。）
+      #
+      # ⚠ 宿主机已开 Clash / Surge 的 TUN 模式时，**不要再配这一层**：TUN 的默认路由
+      #   metric 抢在物理网卡之前，容器出网已经被整体接管，再叠一层代理只会打架
+      #   （TUN 的 fake-ip 会把 host.docker.internal 解析成 198.18.x.x，容器连不过去，
+      #   SteamCMD 会卡在 'Connecting anonymously to Steam Public...Retrying...' 无限重试）。
+      #   遇到「配了代理反而更差」，先把 .env 里这三项清空、并把代理软件切回「直连」验证。
+      # ⚠ 端口别想当然：Clash Verge 的 HTTP/SOCKS 混合端口默认是 7897（老版本才是 7890）。
+      #   填错端口 = 代理等于没配，还会把本来通的直连也弄坏。
       # ⚠ 代理跑在宿主机（Windows/WSL）上时，容器里的 127.0.0.1 指的是容器自己，
-      #   必须写成 host.docker.internal，例如 http://host.docker.internal:7890
-      HTTP_PROXY: ${HTTP_PROXY:-}
-      HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-}
+      #   必须写成 host.docker.internal（见下面 extra_hosts）。
+      # ⚠ 大小写必须同时给：Docker 引擎、apt、wget 这些认大写，但 curl 和
+      #   SteamCMD 内部的下载链路只认小写的 http_proxy / https_proxy。
+      #   只填大写 = SteamCMD 实际没走代理，这是「配了代理也没用」的常见原因。
+      #   .env 里只需要填大写这一组，compose 会自动补出小写形式。
+      #
+      # ⚠⚠⚠ 改完 .env 里的这三项后，必须 `docker compose up -d --force-recreate`
+      #   才会生效 —— 环境变量在容器【创建】时就固化了，`docker compose restart`
+      #   和 restart 策略的自动重启都【不会】重读 .env。这一点极其容易踩：
+      #   .env 里明明清空了代理，容器里却还是旧代理，于是「怎么改都没用」。
+      HTTP_PROXY: ${PROXY_HTTP:-}
+      HTTPS_PROXY: ${PROXY_HTTPS:-}
+      NO_PROXY: ${PROXY_NO:-}
+      http_proxy: ${PROXY_HTTP:-}
+      https_proxy: ${PROXY_HTTPS:-}
+      no_proxy: ${PROXY_NO:-}
+      # 下面两项只用于「容器内自检」：把 .env 里的原始意图也带进容器，
+      # 入口脚本借此识别「容器里的 HTTP_PROXY 其实是旧容器固化的、.env 早就清空了」。
+      # 这正是最难查的一类故障：改 .env 后只 restart 没重建，于是怎么改都没用。
+      PROXY_HTTP: ${PROXY_HTTP:-}
+      PROXY_HTTPS: ${PROXY_HTTPS:-}
+    # ⚠ WSL 原生 dockerd 不会自动提供 host.docker.internal（只有 Docker Desktop 会）。
+    #   不声明这个名字，容器就会拿宿主机的 DNS 去解析，被代理软件的 fake-ip 抢答成
+    #   198.18.x.x 之类的假地址 —— 表现就是"代理端口明明开着，容器却连不上"。
+    #   host-gateway 是 Docker 20.10+ 的内置关键字，指向宿主机的网关地址。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       # ⚠ 服务器对外宣告的端口就是它自己监听的端口，所以这里内外必须一致（${X}:${X}）。
       #   改 PORT 时请同步把 RAW_PORT 设成 PORT+1（原版原始套接字固定为游戏端口+1）。
