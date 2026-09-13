@@ -1007,6 +1007,18 @@ docker compose run --rm ark doctor
 （含「是不是旧容器固化的」判定）**、`steamapps` 是否创建、SteamCMD 日志末尾。
 另外安装失败时，`docker compose logs` 里会**自动附带一版精简诊断**，可直接复制反馈。
 
+**一键重置，从零重来**
+
+```bash
+bash tools/reset.sh               # 停+删容器、删镜像（数据保留）
+bash tools/reset.sh --purge       # 连数据目录一起删（会先备份存档，再二次确认）
+bash tools/reset.sh --purge --up  # 清完直接重新构建并启动
+```
+
+⚠ **改完 `.env` 后必须用这个脚本（或 `docker compose down && up --force-recreate`）** ——
+`docker compose restart` 和 restart 策略都**不会**重读 `.env`，容器里的环境变量是
+「创建那一刻」固化的。这正是「`.env` 里代理已经清空、容器却还在用旧代理」的成因。
+
 ---
 
 ## 十、免责声明
