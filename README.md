@@ -75,6 +75,9 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
+> ⓘ 本项目默认 `restart: "no"` —— **服务端不会自己启动**，每次都要手动 `docker compose up -d`。
+> 想让它开机或打开 WSL 后自动拉起，见 [FAQ 20](#20-服务端会自己启动吗怎么改成完全手动)。
+
 首次启动大致流程（日志里能看到对应提示）：
 
 ```
@@ -667,8 +670,10 @@ Windows 版 Git 默认 `core.autocrlf=true`，克隆代码时会把 `entrypoint.
 #!/usr/bin/env bash\r
 ```
 
-内核会把 `bash\r` 当成解释器名字去找，自然找不到，于是容器启动即退出；
-又因为 `restart: unless-stopped`，就变成日志刷屏的无限重启。
+内核会把 `bash\r` 当成解释器名字去找，自然找不到，于是容器启动即退出。
+如果 restart 策略是 `unless-stopped`（**旧版本**的默认值），就会变成日志刷屏的无限重启；
+**当前版本默认 `restart: "no"`**，容器退出后即保持停止状态（见 [FAQ 20](#20-服务端会自己启动吗怎么改成完全手动)），
+反而更好定位。
 
 **修复方式（本仓库 v1 已自带 `.gitattributes` + Dockerfile 兜底，正常不会再遇到）**
 
@@ -713,7 +718,9 @@ Windows 的 C 盘（`/mnt/c/...`）被 Docker Desktop 映射进容器时走 9p/D
 
 - 日志停在 `Waiting for user info... OK` 之后**立刻**报 `Missing file permissions`
   （注意：**连下载进度都不会出现**，说明不是下载中断，是安装一开始就被拒）
-- 反复重试同样失败，最后 `[错误] 服务端安装失败`，容器退出又被 `restart` 拉起，无限循环
+- 反复重试同样失败，最后 `[错误] 服务端安装失败`，容器退出。
+  旧版本（`restart: unless-stopped`）会被反复拉起、无限循环；当前版本
+  `restart: "no"`，容器退出后停在 `Exited`，日志不会刷屏
 - 有时报 `Missing configuration`；也可能撑到一半变成 `No Connection` / 超时
   ——那是 Steam 网络抖动，属于[另一个问题](#2-steamcmd-下载慢或失败)
 
@@ -879,8 +886,8 @@ docker compose build
 （Clash Verge 默认 **7897**，不是 7890）或代理不可达时，SteamCMD 的下载链路走不通，
 对外就报成 `Missing file permissions` / `Missing configuration`。
 
-这里有个**最隐蔽的坑**：**环境变量在容器「创建」时固化**，`docker compose restart`
-和 `restart: unless-stopped` 的自动重启**都不会重读 `.env`**。于是会出现：
+这里有个**最隐蔽的坑**：**环境变量在容器「创建」时固化**，`docker compose restart`、
+以及任何 restart 策略（`unless-stopped`）触发的自动重启，**都不会重读 `.env`**。于是会出现：
 
 > `.env` 里代理明明清空了，容器里却还挂着旧代理 → 你会觉得「怎么改都没用」。
 
@@ -1118,8 +1125,13 @@ WSL2 有两层独立的空闲计时器：
 
 只要最后一个 WSL 终端关闭，约一分钟后整个 VM 就被关掉。dockerd 停 → 所有容器
 收到 `SIGTERM` → 本项目 entrypoint 的 `graceful_stop` 触发（就是上面那句日志）→
-容器以退出码 0 正常退出。等你下次开终端，WSL 又启动、容器又被 `restart: unless-stopped`
-拉起，但 ARK 还没启动完就再次被回收 —— **死循环**。
+容器以退出码 0 正常退出。在旧版本（`restart: unless-stopped`）下还会继续恶化：
+等你下次开终端，WSL 又启动、容器又被自动拉起，但 ARK 还没启动完就再次被回收 ——
+**死循环**，表现就是「服务端每隔几分钟被重启一次，永远连不上」。
+
+> 当前版本 `restart: "no"`，容器退出后会停在 `Exited`，不会自己再起来。
+> 但**根因仍在**：不处理空闲回收的话，你手动启动的服务端还是会在一分钟后被 SIGTERM 掉。
+> 所以下面这个修法依然必须做。
 
 顺带解释一个反直觉的现象：**开着终端盯着它时不重启，一走开就重启。**
 因为 VM 只在没有任何会话时才计时，挂着会话排查时永远看不到问题。
@@ -1235,6 +1247,66 @@ python tools\a2s-probe.py 192.168.10.10:27015      # 模拟局域网设备（在
 ```
 
 期望输出：`OK  地图=TheIsland 玩家=0/70  名称=...`
+
+---
+
+### 20. 服务端会自己启动吗？怎么改成完全手动
+
+**结论（当前版本）：不会自己启动，一切都由你手动控制。**
+
+完整启动链是三段，缺一不可：
+
+```
+有人启动 WSL
+  → /etc/wsl.conf 的 [boot] systemd=true
+    → docker.service（systemctl is-enabled = enabled）
+      → 容器（restart: "no" ⇒ 到此为止，不会自动启动）
+```
+
+- **电脑开机 / 登录：不会启动。** WSL 发行版不随 Windows 启动，只有你主动碰它才启动。
+  已逐项排查：计划任务里 0 条涉及 WSL、启动文件夹为空、注册表 `Run` 里没有 wsl 相关项。
+  （`WSLService` 的启动类型是 Automatic，但它只是 WSL 管理服务，**不会启动任何发行版**。）
+- **打开 WSL 终端 / 运行任意 `wsl` 命令：** WSL 会启动、dockerd 会启动，**但容器不会** ——
+  因为本项目 `restart` 是 `"no"`。需要手动执行：
+
+```bash
+docker compose up -d      # 启动
+docker compose stop       # 停止（保留容器，下次 up 更快）
+docker compose down       # 停止并删除容器（世界存档在 data/ 里，不受影响）
+```
+
+**为什么不默认用 `unless-stopped`**：早期版本用它，结果是**只要你打开一次 WSL 终端、
+VS Code 连一下 WSL、甚至跑一条 `wsl` 命令，服务端就会自己跑起来并常驻内存**。
+有玩家在线时当然希望它能自愈，但单机自用更希望「我说了算」，所以默认改成 `"no"`。
+
+**想恢复自愈能力**（两种改法）：
+
+```bash
+# 方式一：改文件，然后重建容器（restart 策略在容器创建时固化）
+#   把 docker-compose.yml 的 restart: "no" 改回 unless-stopped，再：
+docker compose up -d
+
+# 方式二：不改文件，直接对运行中的容器生效（立即生效、不重启容器）
+docker update --restart=unless-stopped ark-server
+```
+
+**想连 docker 守护进程也不启动**（更彻底，但每次用 docker 前都要先起它）：
+
+```bash
+sudo systemctl disable docker     # 之后需 sudo systemctl start docker 才能用 docker 命令
+```
+
+> 查当前生效的策略：
+> `docker inspect ark-server --format '{{.HostConfig.RestartPolicy.Name}}'`
+
+**需要一直开着 WSL 终端吗？不需要。**
+`.wslconfig` 里设了 `[general] instanceIdleTimeout=-1` 与 `[wsl2] vmIdleTimeout=-1`，
+WSL 不会因为空闲被回收，关掉所有终端、关掉窗口都不影响它继续运行。
+（这是为了让 ARK 那种「启动要 2~3 分钟」的服务端不被中途 SIGTERM，详见 [FAQ 17](#17-服务端每隔几分钟就被重启一次永远连不上)。）
+
+代价是 WSL 会常驻内存（`vmmemWSL` 一直占着）。如果你更想要「不用时自动释放内存」，
+就把这两行删掉 —— 但那样服务端会在最后一个终端关闭约 1 分钟后被停掉，下次要等 2~3 分钟启动。
+「不用挂终端」和「不常驻内存」是互斥的，按你的使用习惯取舍。
 
 ---
 

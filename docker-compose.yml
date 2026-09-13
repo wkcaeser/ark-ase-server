@@ -22,8 +22,12 @@ services:
       #     PS:    $env:HTTP_PROXY="http://host.docker.internal:7890"; docker compose build
     image: ark-ase-server:latest
     container_name: ark-server
-    # 服务器崩溃或宿主机重启后自动拉起
-    restart: unless-stopped
+    # 不自动启动：只在手动执行 `docker compose up -d` 时才起来。
+    # 注意 WSL2 的启动链是「WSL 启动 → systemd → docker.service → 容器」，
+    # 早先这里是 unless-stopped，导致只要打开一次 WSL 终端、或 VS Code 连一下
+    # WSL、甚至跑任意一条 wsl 命令，服务端就会自己跑起来。
+    # 改成 "no" 后即使 docker 守护进程起来了，容器也不会自己启动。
+    restart: "no"
     # 停机时给够时间：入口脚本会先发 SIGINT 让服务端保存世界
     stop_grace_period: 150s
     env_file:
