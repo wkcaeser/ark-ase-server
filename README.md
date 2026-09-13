@@ -308,9 +308,17 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=1404697612
 
 所有倍率**默认值都是 1（= 官方原版）**。改完 `.env` 后 `docker compose up -d` 生效。
 
+> ⓘ 下表所有倍率都由入口脚本写进 **`Game.ini` 的 `[/script/shootergame.shootergamemode]`**，
+> 不是 `GameUserSettings.ini`——后者会把它们丢掉（原因见 [FAQ 21](#21-env-里-pve--伤害数值--难度改了没反应--服务端把-ini-重写了)）。
+> 核对是否真的写进去了：
+
+```bash
+docker exec ark-server cat /ark/ShooterGame/Saved/Config/LinuxServer/Game.ini
+```
+
 ### 常用倍率对照
 
-| 中文名 | `.env` 变量 | 写入的 ini 键 | 备注 |
+| 中文名 | `.env` 变量 | 写入的 ini 键（在 `Game.ini`） | 备注 |
 | --- | --- | --- | --- |
 | 驯养速度 | `TAMING_SPEED_MULTIPLIER` | `TamingSpeedMultiplier` | 数值越大驯得越快，**20** 大概几分钟驯好一只霸王龙 |
 | 蛋孵化速度 | `EGG_HATCH_SPEED_MULTIPLIER` | `EggHatchSpeedMultiplier` | 数值越大孵化越快 |
@@ -406,8 +414,8 @@ CONFIG_REGENERATE=false
 
 | 文件 | 存放内容 |
 | --- | --- |
-| `GameUserSettings.ini` | 服务器基础设置与绝大多数倍率（`[ServerSettings]`）、最大人数（`[/Script/Engine.GameSession]`） |
-| `Game.ini` | 玩法/模式类设置（`[/script/shootergame.shootergamemode]`）：每级属性倍率、单机模式加成、模组相关的数值覆盖等 |
+| `GameUserSettings.ini` | 服务器基础设置（`[ServerSettings]`）、最大人数（`[/Script/Engine.GameSession]`） |
+| `Game.ini` | 玩法/模式类设置（`[/script/shootergame.shootergamemode]`）：**所有倍率**、每级属性倍率、单机模式加成、模组相关的数值覆盖等 |
 
 > 同一个设置同时出现在两个文件里时，以 `Game.ini` 为准；服务端不认识的键会被静默忽略。
 
@@ -417,6 +425,10 @@ CONFIG_REGENERATE=false
 > `AllowFlyerCarryPvE`、`DisableStructureDecayPvE` 这些**会话级选项会被整行丢掉**，
 > 只能走命令行（`.env` 里已有对应开关，其他用 `EXTRA_URL_ARGS`）。
 > 判据、证据与核对命令见 [FAQ 21](#21-env-里-pve--伤害数值--难度改了没反应--服务端把-ini-重写了)。
+
+> ⚠ **倍率（`XPMultiplier`、`HarvestAmountMultiplier`、`TamingSpeedMultiplier` … 共 22 项）
+> 同理，也是被丢掉的**，所以本项目把它们统一写进 `Game.ini`。
+> 你不需要关心这件事——改 `.env` 即可，入口脚本会自动落到正确的位置。
 
 ---
 
@@ -877,16 +889,16 @@ ERROR: failed to resolve source metadata for docker.io/docker/dockerfile:1:
 `connection reset by peer` = 到 Docker Hub 的连接被重置，就是这一步过不去。
 
 修法是**给 WSL 里的 dockerd 配加速器**（Docker Desktop 的图形界面这里没有，
-直接写 JSON 文件）：
+直接写 JSON 文件）—— 具体命令、可用站点清单、以及「阿里云的地址能不能用」见
+[FAQ 22](#22-docker-compose-build--docker-pull-拉不到镜像wsl-里出网被重置)。快速版：
 
 ```bash
-# 在 WSL 里执行
+# 在 WSL 里执行（实测可用；镜像站会失效，拉不动时按 FAQ 22 换）
 sudo mkdir -p /etc/docker
 sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
 {
   "registry-mirrors": [
-    "https://docker.xuanyuan.me",
-    "https://docker.1ms.run",
+    "https://docker.1panel.live",
     "https://docker.m.daocloud.io"
   ]
 }
@@ -899,6 +911,7 @@ docker compose build
 
 > ⚠ `restart docker` 会让**所有容器**收到 SIGTERM。本项目 entrypoint 会先做一次
 > 优雅停服（保存世界），稍等即可；重启完记得 `docker compose up -d` 把服务器拉起来。
+> 更稳的做法是同时给 dockerd 配 Clash 代理（走真实 Docker Hub），见 FAQ 22。
 
 **兜底做法：只改了 entrypoint.sh 时，可以走「增量构建」**
 
@@ -1434,7 +1447,7 @@ docker exec -u root ark-server iconv -f UTF-16LE -t UTF-8 \
 | --- | --- | --- |
 | 服务端绑定为 config 属性 | ✅ 会读，且会被回写保留 | `ServerCrosshair`、`AllowThirdPersonPlayer`、`ShowMapPlayerLocation`、`AllowHitMarkers`、`AutoSavePeriodMinutes`、`RCONEnabled`、`ServerAdminPassword` |
 | **会话级选项** | ❌ 重写时整行丢掉，等于没写 | `ServerPVE`、`ServerHardcore`、`ShowFloatingDamageText`、`DifficultyOffset`、`OverrideOfficialDifficulty`、`AllowFlyerCarryPvE`、`DisableStructureDecayPvE` |
-| 倍率类 | ⚠️ 可靠位置是 `Game.ini` 的 `[/script/shootergame.shootergamemode]` | `TamingSpeedMultiplier`、`HarvestAmountMultiplier` 等 |
+| 倍率类 | ✅ 写 **`Game.ini`** 的 `[/script/shootergame.shootergamemode]` 才生效 | `XPMultiplier`、`TamingSpeedMultiplier`、`HarvestAmountMultiplier`、`LootQualityMultiplier`、`DinoCountMultiplier` 等 22 项 |
 
 **结论：这一类键唯一的可靠入口是启动命令行。**
 
@@ -1485,12 +1498,104 @@ docker compose up -d --force-recreate
    的含义就是「野生生物最高 150 级」（这是本项目的原始设计意图，之前一直被丢弃没生效）。
    要保持低难度，把 `OVERRIDE_OFFICIAL_DIFFICULTY` 调回 `1` 即可。
 
-> **顺带记一笔（未修，待确认）**：同一份被重写的文件里，`XPMultiplier`、`LootQualityMultiplier`、
+> **倍率也一并修好了。** 同一份被重写的文件里，`XPMultiplier`、`LootQualityMultiplier`、
 > `DinoCountMultiplier`、`CropGrowthSpeedMultiplier`、`HarvestHealthMultiplier`、
-> `ItemWeightMultiplier`、`PlayerCharacterFoodDrainMultiplier` 等**只写在 `GameUserSettings.ini`
-> 里的倍率也一并被丢掉了**，即它们目前多半没有生效。这些键的可靠位置同样是
-> `Game.ini` 的 `[/script/shootergame.shootergamemode]`。要动的话属于玩平衡调整，
-> 别在没确认前一次性全开（尤其 `DINO_COUNT_MULTIPLIER=10`，会明显吃性能）。
+> `ItemWeightMultiplier`、`PlayerCharacterFoodDrainMultiplier` 等 22 项倍率原先只写在
+> `GameUserSettings.ini`，因此**一直没有生效**；现在入口脚本已把它们全部改写到
+> `Game.ini` 的 `[/script/shootergame.shootergamemode]`，改一次 `.env` 即真正生效。
+>
+> 核对（应能看到 `XPMultiplier`、`DinoCountMultiplier` 等）：
+>
+> ```bash
+> docker exec ark-server cat /ark/ShooterGame/Saved/Config/LinuxServer/Game.ini
+> ```
+>
+> ⚠ 这些倍率以前是「默默没生效」，所以现在**第一次真正生效会明显改变游戏手感**。
+> 尤其 `DINO_COUNT_MULTIPLIER=10`（野生生物密度 ×10）会明显吃内存与 CPU，
+> 觉得卡就把 `.env` 里这一项调回 `1`（或 2~3）再 `docker compose up -d --force-recreate`。
+
+---
+
+### 22. `docker compose build` / `docker pull` 拉不到镜像（WSL 里出网被重置）
+
+**现象**：宿主机开着代理，浏览器一切正常，但 WSL 里
+
+```bash
+docker compose build
+docker pull debian:12-slim
+```
+
+卡住不动，或报 `connection reset by peer` / `i/o timeout` / `failed to resolve source metadata`。
+
+**真因**：**WSL 里的 `dockerd` 不继承 Windows 的「系统代理」开关。**
+Windows 侧的 Clash 只改了 Windows 的 WinINET/WinHTTP 设置，WSL 是独立网络命名空间，
+出网走的是裸连接 —— 于是直连 `registry-1.docker.io` 被重置。
+
+**关于「改用阿里云镜像地址」：**
+
+| 候选 | 能不能用 | 说明 |
+| --- | --- | --- |
+| `https://<你的ID>.mirror.aliyuncs.com` | ✅ 可以，但**要你自己去领** | 阿里云「容器镜像服务 → 镜像加速器」里给的是**带账号专属 ID** 的地址，没有通用地址。把控制台里那串复制给我（或自己填进下面的 `daemon.json` 数组**最前面**）即可 |
+| `registry.cn-hangzhou.aliyuncs.com` | ❌ **不行**（常见误区） | 这是阿里云**自己的镜像仓库**（只放你自己的私有镜像），不是 Docker Hub 的镜像站。填进 `registry-mirrors` 实测返回 `401`，拉公共镜像必失败 |
+| `docker.mirrors.ustc.edu.cn`、`hub-mirror.c.163.com` | ❌ 已失效 | 2024 年起对外关闭，实测连接超时（`000`） |
+
+**本项目采用的方案（已配置好，双保险）：**
+
+1. **registry-mirrors**：走实测可用的公共镜像站 `docker.1panel.live`（`docker.m.daocloud.io` 作为备选）。
+2. **给 dockerd 本身配代理**：本机已开 Clash（混合端口 `7897`）、WSL 是 `mirrored` 网络模式，
+   所以 WSL 里的 `127.0.0.1:7897` **就是** Windows 的 Clash 端口 —— 让 `dockerd` 走它，直连 Docker Hub。
+   实测 `curl -x http://127.0.0.1:7897 https://registry-1.docker.io/v2/` 返回 `401`
+   （= 连通成功，401 只是「需要 token」的正常应答）。
+
+两个文件（都在 WSL 里，`sudo` 执行）：
+
+```bash
+# ① 镜像站
+sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
+{
+  "registry-mirrors": [
+    "https://docker.1panel.live",
+    "https://docker.m.daocloud.io"
+  ]
+}
+EOF
+
+# ② dockerd 走 Clash 代理
+sudo mkdir -p /etc/systemd/system/docker.service.d
+sudo tee /etc/systemd/system/docker.service.d/http-proxy.conf >/dev/null <<'EOF'
+[Service]
+Environment="HTTP_PROXY=http://127.0.0.1:7897"
+Environment="HTTPS_PROXY=http://127.0.0.1:7897"
+Environment="NO_PROXY=localhost,127.0.0.1,::1,172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
+EOF
+
+# ③ 生效（会重启 dockerd → 容器会被停掉，记得再 up 回来）
+sudo systemctl daemon-reload && sudo systemctl restart docker
+docker pull debian:12-slim          # 验证
+```
+
+> ⚠ **重启 dockerd 会停掉所有容器**，且本项目是 `restart: "no"`，不会自动拉回。
+> 执行完记得 `docker compose up -d`。
+
+**换成阿里云加速器**：把控制台里那串地址加进 `registry-mirrors` **数组第一位**（阿里云的加速器优先），
+然后 `sudo systemctl restart docker`。阿里云加速器只对 Docker Hub 生效，
+BuildKit 前端（`docker/dockerfile:1`）这类也是从 Docker Hub 拉的，同样受益。
+
+**排查用**（各镜像站/代理的实际连通性）：
+
+```bash
+# 镜像站能不能服务这个镜像（200 = 可用）
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+  https://docker.1panel.live/v2/library/debian/manifests/12-slim
+
+# 代理通不通（401 = 通了）
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -x http://127.0.0.1:7897 https://registry-1.docker.io/v2/
+
+# 当前生效的镜像站
+docker info | sed -n '/Registry Mirrors/,+3p'
+```
 
 ---
 

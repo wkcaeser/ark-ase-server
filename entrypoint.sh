@@ -703,29 +703,12 @@ write_game_user_settings() {
     printf 'ShowFloatingDamageText=%s\n' "$(is_true "$SHOW_FLOATING_DAMAGE_TEXT" && echo True || echo False)"
     printf 'AllowHitMarkers=%s\n' "$(is_true "$ALLOW_HIT_MARKERS" && echo True || echo False)"
     printf '\n'
-    printf '; ---------- 倍率（由环境变量注入）----------\n'
-    printf 'XPMultiplier=%s\n' "$XP_MULTIPLIER"
-    printf 'TamingSpeedMultiplier=%s\n' "$TAMING_SPEED_MULTIPLIER"
-    printf 'EggHatchSpeedMultiplier=%s\n' "$EGG_HATCH_SPEED_MULTIPLIER"
-    printf 'BabyMatureSpeedMultiplier=%s\n' "$BABY_MATURE_SPEED_MULTIPLIER"
-    printf 'MatingIntervalMultiplier=%s\n' "$MATING_INTERVAL_MULTIPLIER"
-    printf 'MatingSpeedMultiplier=%s\n' "$MATING_SPEED_MULTIPLIER"
-    printf 'LayEggIntervalMultiplier=%s\n' "$LAY_EGG_INTERVAL_MULTIPLIER"
-    printf 'BabyImprintingStatScaleMultiplier=%s\n' "$BABY_IMPRINTING_STAT_SCALE_MULTIPLIER"
-    printf 'BabyFoodConsumptionSpeedMultiplier=%s\n' "$BABY_FOOD_CONSUMPTION_SPEED_MULTIPLIER"
-    printf 'ItemWeightMultiplier=%s\n' "$ITEM_WEIGHT_MULTIPLIER"
-    printf 'HarvestAmountMultiplier=%s\n' "$HARVEST_AMOUNT_MULTIPLIER"
-    printf 'HarvestHealthMultiplier=%s\n' "$HARVEST_HEALTH_MULTIPLIER"
-    printf 'LootQualityMultiplier=%s\n' "$LOOT_QUALITY_MULTIPLIER"
-    printf 'CropGrowthSpeedMultiplier=%s\n' "$CROP_GROWTH_SPEED_MULTIPLIER"
-    printf 'DinoCountMultiplier=%s\n' "$DINO_COUNT_MULTIPLIER"
-    printf 'DinoCharacterFoodDrainMultiplier=%s\n' "$DINO_FOOD_DRAIN_MULTIPLIER"
-    printf 'DinoCharacterStaminaDrainMultiplier=%s\n' "$DINO_STAMINA_DRAIN_MULTIPLIER"
-    printf 'DinoCharacterHealthRecoveryMultiplier=%s\n' "$DINO_HEALTH_RECOVERY_MULTIPLIER"
-    printf 'PlayerCharacterFoodDrainMultiplier=%s\n' "$PLAYER_FOOD_DRAIN_MULTIPLIER"
-    printf 'PlayerCharacterWaterDrainMultiplier=%s\n' "$PLAYER_WATER_DRAIN_MULTIPLIER"
-    printf 'PoopIntervalMultiplier=%s\n' "$POOP_INTERVAL_MULTIPLIER"
-    printf 'FuelConsumptionIntervalMultiplier=%s\n' "$FUEL_CONSUMPTION_INTERVAL_MULTIPLIER"
+    printf '; ---------------------------------------------------------------------------\n'
+    printf '; ⚠ 倍率类设置【不写在本文件里】。\n'
+    printf ';   服务端启动时会用自己认识的那批 [ServerSettings] 键重写 GameUserSettings.ini，\n'
+    printf ';   上面这些 XPMultiplier / HarvestAmountMultiplier / ... 不在其中，会被整行丢弃。\n'
+    printf ';   它们的写入位置是 Game.ini 的 [/script/shootergame.shootergamemode]，见 README FAQ 21。\n'
+    printf '; ---------------------------------------------------------------------------\n'
     printf '\n[/Script/Engine.GameSession]\n'
     printf 'MaxPlayers=%s\n' "$MAX_PLAYERS"
   } > "$tmp"
@@ -747,13 +730,44 @@ write_game_ini() {
     printf 'PerLevelStatsMultiplier_Player[7]=%s\n' "$PLAYER_WEIGHT_PER_LEVEL_MULTIPLIER"
     printf 'PerLevelStatsMultiplier_DinoTamed[7]=%s\n' "$DINO_WEIGHT_PER_LEVEL_MULTIPLIER"
     printf '\n'
-    printf '; ---------- 驯养 / 繁殖 / 采集倍率（与 GameUserSettings.ini 同步写入）----------\n'
-    printf '; 同名设置同时存在于两个文件时以 Game.ini 为准；本版服务端不认识的键会被自动忽略。\n'
+    printf '; ==========================================================================\n'
+    printf ';  倍率设置（由 .env 注入）\n'
+    printf ';  ⚠ 为什么全在这里、而不是 GameUserSettings.ini 的 [ServerSettings]：\n'
+    printf ';    服务端启动时会用自己认识的 [ServerSettings] 键整体重写 GameUserSettings.ini，\n'
+    printf ';    不认识的键（本段几乎全部）会被整行丢弃 —— 表现为 .env 改了没有任何反应。\n'
+    printf ';    [/script/shootergame.shootergamemode] 里的同名键才是生效位置。详见 README FAQ 21。\n'
+    printf ';  ⚠ 本段与 .env 一一对应，想改倍率请改 .env（改本文件会在下次启动被覆盖）。\n'
+    printf '; ==========================================================================\n'
+    printf '\n'
+    printf '; ---------- 经验 ----------\n'
+    printf 'XPMultiplier=%s\n' "$XP_MULTIPLIER"
+    printf '\n'
+    printf '; ---------- 驯养 / 繁殖 / 孵化 ----------\n'
     printf 'TamingSpeedMultiplier=%s\n' "$TAMING_SPEED_MULTIPLIER"
     printf 'EggHatchSpeedMultiplier=%s\n' "$EGG_HATCH_SPEED_MULTIPLIER"
     printf 'BabyMatureSpeedMultiplier=%s\n' "$BABY_MATURE_SPEED_MULTIPLIER"
     printf 'MatingIntervalMultiplier=%s\n' "$MATING_INTERVAL_MULTIPLIER"
+    printf 'MatingSpeedMultiplier=%s\n' "$MATING_SPEED_MULTIPLIER"
+    printf 'LayEggIntervalMultiplier=%s\n' "$LAY_EGG_INTERVAL_MULTIPLIER"
+    printf 'BabyImprintingStatScaleMultiplier=%s\n' "$BABY_IMPRINTING_STAT_SCALE_MULTIPLIER"
+    printf 'BabyFoodConsumptionSpeedMultiplier=%s\n' "$BABY_FOOD_CONSUMPTION_SPEED_MULTIPLIER"
+    printf '\n'
+    printf '; ---------- 采集 / 掉落 / 生长 / 刷新 ----------\n'
     printf 'HarvestAmountMultiplier=%s\n' "$HARVEST_AMOUNT_MULTIPLIER"
+    printf 'HarvestHealthMultiplier=%s\n' "$HARVEST_HEALTH_MULTIPLIER"
+    printf 'LootQualityMultiplier=%s\n' "$LOOT_QUALITY_MULTIPLIER"
+    printf 'CropGrowthSpeedMultiplier=%s\n' "$CROP_GROWTH_SPEED_MULTIPLIER"
+    printf 'DinoCountMultiplier=%s\n' "$DINO_COUNT_MULTIPLIER"
+    printf '\n'
+    printf '; ---------- 负重 / 消耗 / 恢复 ----------\n'
+    printf 'ItemWeightMultiplier=%s\n' "$ITEM_WEIGHT_MULTIPLIER"
+    printf 'DinoCharacterFoodDrainMultiplier=%s\n' "$DINO_FOOD_DRAIN_MULTIPLIER"
+    printf 'DinoCharacterStaminaDrainMultiplier=%s\n' "$DINO_STAMINA_DRAIN_MULTIPLIER"
+    printf 'DinoCharacterHealthRecoveryMultiplier=%s\n' "$DINO_HEALTH_RECOVERY_MULTIPLIER"
+    printf 'PlayerCharacterFoodDrainMultiplier=%s\n' "$PLAYER_FOOD_DRAIN_MULTIPLIER"
+    printf 'PlayerCharacterWaterDrainMultiplier=%s\n' "$PLAYER_WATER_DRAIN_MULTIPLIER"
+    printf 'PoopIntervalMultiplier=%s\n' "$POOP_INTERVAL_MULTIPLIER"
+    printf 'FuelConsumptionIntervalMultiplier=%s\n' "$FUEL_CONSUMPTION_INTERVAL_MULTIPLIER"
   } > "$tmp"
 
   merge_ini "$tmp" "${USER_CONFIG_DIR}/Game.ini.extra" > "$CONFIG_DIR/Game.ini"
