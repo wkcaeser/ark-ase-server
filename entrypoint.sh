@@ -108,6 +108,7 @@ CONFIG_BACKUP="${CONFIG_BACKUP:-true}"              # 重写前备份旧配置�
 BACKUP_KEEP="${BACKUP_KEEP:-10}"                    # backup 子命令保留的备份份数
 STOP_TIMEOUT="${STOP_TIMEOUT:-90}"                  # 停机时等待世界保存的秒数
 SKIP_INSTALL_ON_START="${SKIP_INSTALL_ON_START:-false}"  # true=启动时完全不碰 SteamCMD
+STEAM_PRECHECK="${STEAM_PRECHECK:-true}"             # 更新前先探测 Steam 是否可达，不可达就跳过（省约 7 分钟）
 ALLOW_WINDOWS_DATA_DIR="${ALLOW_WINDOWS_DATA_DIR:-false}" # true=数据目录在 Windows/网络挂载上也照常启动（不推荐）
 
 # --------------------------- 服务器身份 -------------------------------------
@@ -358,6 +359,26 @@ steamcmd_run() {
     warn "SteamCMD 执行失败，10 秒后重试…"
     attempt=$((attempt + 1))
     sleep 10
+  done
+  return 1
+}
+
+# Steam 可达性预检：只回答「现在跑 SteamCMD 有没有意义」，几秒内出结果。
+# 为什么需要它：SteamCMD 在「连不上 Steam」时不会立刻失败 —— 每次要连吃 2 次
+# 60 秒超时（等待客户端配置 / 查询 AppID），配合 STEAMCMD_RETRIES=3 就是 ≈7 分钟，
+# 而这段等待整段都在容器启动路径上，表现成「up -d 之后服务端迟迟不出来」。
+#   ① Steam WebAPI：SteamCMD 取 CM 服务器列表也走它，最准的一枪；
+#   ② 极端情况下 WebAPI 被单独阻断、CM 端口却通，再补一次 TCP 探测。
+# 返回 0 = 认为可达（继续正常更新）；1 = 不可达（调用方跳过本次更新）
+steam_reachable() {
+  local url="${STEAM_PROBE_URL:-https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/}"
+  local h
+  if command -v curl >/dev/null 2>&1; then
+    # 故意不加 -f：这里只关心「连得上」，HTTP 状态码是什么都算可达
+    curl -sS -m "${STEAM_PROBE_HTTP_TIMEOUT:-6}" -o /dev/null "$url" 2>/dev/null && return 0
+  fi
+  for h in ${STEAM_PROBE_HOSTS:-cm-01-scl1.cm.steampowered.com cm-02-scl1.cm.steampowered.com}; do
+    timeout "${STEAM_PROBE_TCP_TIMEOUT:-3}" bash -c "exec 3<>/dev/tcp/${h}/443" 2>/dev/null && return 0
   done
   return 1
 }
@@ -1075,9 +1096,31 @@ do_start() {
   build_mod_list
   render_configs
 
+  # 更新前置检查：Steam 不可达时别让启动白等（详见 steam_reachable 的注释）
+  #   探得到 → 正常更新
+  #   探不到 + 服务端已在本地 → 跳过本次更新直接启动（几秒进入加载）
+  #   探不到 + 服务端还没装 → 仍然真跑一次：install_server 失败时会给出完整排障信息，
+  #                            比无声跳过有用得多
+  local skip_update=""
   if is_true "$SKIP_INSTALL_ON_START"; then
     warn "SKIP_INSTALL_ON_START=true，跳过服务端与模组更新"
-  else
+    skip_update="1"
+  elif is_true "$STEAM_PRECHECK" && [ -x "$SERVER_BIN" ] \
+       && { is_true "$AUTO_UPDATE" || is_true "$MOD_UPDATE"; }; then
+    if steam_reachable; then
+      log "Steam 预检通过，继续检查服务端/模组更新"
+    else
+      skip_update="1"
+      warn "Steam 预检不通：本容器现在连不上 Steam（多为直连被阻断 / 代理对容器无效）"
+      warn "  已跳过本次服务端与模组更新，直接启动 —— 省掉约 7 分钟的必败重试"
+      warn "  · 想强制更新一次： docker compose run --rm ark install"
+      warn "  · 让容器也能走代理：① 打开代理软件的 TUN 模式（网络层接管，推荐）"
+      warn "                      ② 或在 .env 里配 PROXY_HTTP / PROXY_HTTPS 指向宿主机代理"
+      warn "  · 完整自检：       docker compose run --rm ark doctor"
+    fi
+  fi
+
+  if [ -z "$skip_update" ]; then
     ensure_steamcmd
     if [ ! -x "$SERVER_BIN" ] || is_true "$AUTO_UPDATE"; then
       install_server

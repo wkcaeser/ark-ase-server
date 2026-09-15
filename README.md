@@ -287,6 +287,7 @@ https://steamcommunity.com/sharedfiles/filedetails/?id=1404697612
 | `STOP_TIMEOUT` | `90` | 停机时等待世界保存的秒数 |
 | `SKIP_INSTALL_ON_START` | `false` | `true`=启动时完全不执行 SteamCMD（离线环境） |
 | `STEAMCMD_RETRIES` | `3` | SteamCMD 失败重试次数 |
+| `STEAM_PRECHECK` | `true` | 更新前先探测 Steam 可达性，探不到就跳过本次更新直接启动（省掉 ≈7 分钟的必败重试）。见 [FAQ 23](#23-开机后第一次-up--d服务端迟迟不出来以为起不来了重跑一次又好了) |
 | `STEAM_USER` | 空 | Steam 账号；留空=匿名登录。通常不需要，仅在容器/网络都确认干净、匿名确实被挡时才试（见 FAQ 15 修复四） |
 | `STEAM_PASS` | 空 | 上面的密码；日志里会自动打码成 `***`。**别把 `.env` 提交进 git** |
 | `EXTRA_ARGS` | 空 | 追加任意**启动参数**（原样追加，不拼进地图 URL），如 `-ForceAllowCaveFlyers` |
@@ -1596,6 +1597,115 @@ curl -s -o /dev/null -w '%{http_code}\n' \
 # 当前生效的镜像站
 docker info | sed -n '/Registry Mirrors/,+3p'
 ```
+
+---
+
+### 23. 开机后第一次 `up -d`，服务端迟迟不出来（以为起不来了，重跑一次又好了）
+
+**现象**：重启 Windows 后进 WSL，`docker compose up -d` 敲下去，容器是起来的，
+但服务端要等好几分钟才出现；`docker compose stop` 之后再 `up -d` 一次，反倒很快就好。
+
+**先纠正一个直觉**：`docker compose stop` 只是停容器 —— 它不改镜像、不改网络、
+不改配置，也不"清理"任何东西。所以它不可能是后面那次成功的原因，
+真正起作用的是**你重试了一次**。第一次为什么慢，看下面。
+
+#### 真因：启动更新在等 Steam，而容器到 Steam 的直连时通时不通
+
+容器每次启动都会跑 SteamCMD（`AUTO_UPDATE=true` + `MOD_UPDATE=true`）。
+SteamCMD 连不上 Steam 时**不会立刻失败**，每次要连吃 2 个 60 秒超时：
+
+```
+Connecting anonymously to Steam Public...OK
+Waiting for client config...
+steamcmd has been disconnected from steam with result 3 (No Connection)
+ERROR! Info request for AppId 7 returned error Timeout.
+ERROR! Info request for AppId 376030 returned error Timeout.
+```
+
+配合 `STEAMCMD_RETRIES=3` 就是 **≈7 分钟**，而且整段都堵在容器启动路径上。
+一次实测的"慢启动"时间线（取自 `docker logs` 的原始时间戳）：
+
+```
+23:24:27  开始用 SteamCMD 更新服务端
+23:26:33  第 1 次失败（60s 超时 ×2）
+23:28:51  第 2 次失败
+23:31:10  第 3 次失败 → 放弃更新（本地已有文件，继续启动）
+23:32:53  服务端进程才起来          ← 距容器启动 8 分 27 秒
+```
+
+同一个镜像、同一个容器，**只是重跑一次**：SteamCMD 16 秒返回
+`Success! App '376030' already up to date.`，模组下载正常，服务端 **87 秒**起来。
+差别不在 `stop`，而在**那一刻 Steam 正好通** —— 自测（容器内执行）：
+
+```bash
+docker exec ark-server curl -sS -m 8 -o /dev/null -w 'http=%{http_code}\n' \
+  https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/
+# 200 = 通（正常更新）；000 = 超时（此时 SteamCMD 必然要磨 7 分钟）
+```
+
+同一时刻的对照测试：
+
+| 从哪里测 | 目标 | 结果 |
+| --- | --- | --- |
+| 容器内 | `www.baidu.com` / `api.github.com` | **200**（出网本身没问题） |
+| 容器内 | `api.steampowered.com` / `steamcommunity.com` / CM 端口 27015·27017 | **超时** |
+| WSL 宿主机 | `api.steampowered.com` | **超时** —— 不是 Docker 的锅 |
+| Windows 直连 | `api.steampowered.com` | **超时** |
+| Windows 经 Clash `127.0.0.1:7897` | `api.steampowered.com` | **200（0.9 秒）** |
+
+结论：**只有走代理这条路能稳定到 Steam**。而容器默认是直连 —— `.env` 里
+`PROXY_HTTP` 留空，且 Clash 处于「系统代理」模式；系统代理是**应用层**设置，
+只对 Windows 上会读它的程序生效，**WSL 与容器的流量不会被它接管**。
+
+#### 已修复：启动不再被 Steam 卡住
+
+入口脚本新增 **Steam 可达性预检**（`STEAM_PRECHECK=true`，默认开）：
+更新前先花几秒探一下，探不到就跳过本次更新直接启动，并在日志里讲清楚原因：
+
+```
+[警告] Steam 预检不通：本容器现在连不上 Steam（多为直连被阻断 / 代理对容器无效）
+[警告]   已跳过本次服务端与模组更新，直接启动 —— 省掉约 7 分钟的必败重试
+[警告]   · 想强制更新一次： docker compose run --rm ark install
+```
+
+- 探得到 → 正常更新，行为和以前完全一样
+- 探不到 + 服务端已在本地 → 跳过更新，几秒进入加载
+- 探不到 + 服务端还没装 → 仍然真跑一次（失败时给出完整排障信息，比无声跳过有用）
+
+确认 Steam 通了以后想强制更新：`docker compose run --rm ark install`。
+不想用预检（极少数环境可能误判）：`.env` 里设 `STEAM_PRECHECK=false`。
+
+#### 想让容器稳定连上 Steam
+
+两条路二选一，**不要同时用**：
+
+1. **开代理软件的 TUN 模式**（推荐）：TUN 是网络层接管，WSL 与容器的流量一起走代理，
+   不用改任何配置。⚠ 此时 `.env` 里的 `PROXY_HTTP/PROXY_HTTPS` **必须留空**，
+   否则 fake-ip 会把 `host.docker.internal` 解析成 `198.18.x.x`，容器连不过去
+   （见 [FAQ 16](#16-容器里-steamcommunitycom-解析成-19818xx是出问题了吗)）。
+2. **给容器配代理**：`.env` 里填两行同值
+   `PROXY_HTTP=http://host.docker.internal:7897`、`PROXY_HTTPS=...`，
+   然后 `docker compose up -d --force-recreate`（改环境变量必须重建，不能只 restart）。
+   ⚠ 本机实测这条路**当前不通**：容器连不到宿主机的 7897，
+   `host.docker.internal`（解析成 172.17.0.1，docker0 已 linkdown）和
+   `192.168.10.10` 都是 connection refused。要在 Windows 防火墙放行**入站 7897**
+   （来源填 `172.30.0.0/16`，即本项目容器网段）才可能通；
+   而且 SteamCMD 的 CM 登录走 TCP 27015~27050，HTTP 代理未必兜得住，所以第 1 条更稳。
+
+> 只和熟人玩、不需要服务器出现在公开列表里：**什么都不用改**。
+> 预检会让每次启动都很快，更新等到需要时手动跑一次即可。
+
+#### 另外两个独立的坑（顺手记一下）
+
+- **`--build` 会多一次网络依赖**。`docker compose up -d --build` 要拉
+  `docker/dockerfile:1` 构建前端和 `debian:12-slim`；开机后代理/镜像站还没就绪时
+  它会**直接失败**（报构建错误，看起来就像"起不来"）。启动只需要 `up -d`
+  —— 镜像早就在本地。跟 `stop` 同样没关系，去掉 `--build` 才是那次"好了"的原因。
+- **模组每次启动都会重新部署**。`install_mods` 会把模组从 SteamCMD 缓存目录
+  （`/opt/steamcmd/Steam/...`）重新部署到 `/ark/ShooterGame/Content/Mods`。
+  这两处是**不同挂载卷**，硬链接用不了会退化成**复制** —— 三个模组（含 3.1 GB 的
+  野人模组）实测约 **70 秒**。想省掉需要改成"目标已存在且源未变化就跳过部署"，
+  属于可选优化；不想要这 70 秒的话可以反馈。
 
 ---
 
