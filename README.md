@@ -1602,8 +1602,15 @@ docker info | sed -n '/Registry Mirrors/,+3p'
 
 ### 23. 开机后第一次 `up -d`，服务端迟迟不出来（以为起不来了，重跑一次又好了）
 
+> ⚠ **本节结论的适用范围（后补的更正）**
+> 本节描述的 SteamCMD 卡顿**确实发生过**，`STEAM_PRECHECK` 也是针对它加的，这部分有效。
+> 但它**解释不了「`docker logs` 一行新内容都没有」**：卡在 SteamCMD 时入口脚本会不断打印
+> 「SteamCMD 执行失败，10 秒后重试…」，日志是**有**输出的。
+> 如果你看到的是**完全没有新日志**，那说明容器压根没被启动 —— 那是另一回事，
+> 直接看 [FAQ 24](#24-用了-up--d-但-docker-logs-一行新日志都没有)。
+
 **现象**：重启 Windows 后进 WSL，`docker compose up -d` 敲下去，容器是起来的，
-但服务端要等好几分钟才出现；`docker compose stop` 之后再 `up -d` 一次，反倒很快就好。
+但服务端要等好几分钟才出现。
 
 **先纠正一个直觉**：`docker compose stop` 只是停容器 —— 它不改镜像、不改网络、
 不改配置，也不"清理"任何东西。所以它不可能是后面那次成功的原因，
@@ -1706,6 +1713,72 @@ docker exec ark-server curl -sS -m 8 -o /dev/null -w 'http=%{http_code}\n' \
   这两处是**不同挂载卷**，硬链接用不了会退化成**复制** —— 三个模组（含 3.1 GB 的
   野人模组）实测约 **70 秒**。想省掉需要改成"目标已存在且源未变化就跳过部署"，
   属于可选优化；不想要这 70 秒的话可以反馈。
+
+---
+
+### 24. 用了 `up -d` 但 `docker logs` 一行新日志都没有
+
+**现象**：`docker compose up -d` 敲下去，然后 `docker logs ark-server` 看不到任何新内容；
+`docker compose down` 之后再 `up -d` 就好了。
+
+#### 先明确一点：「没有新日志」意味着容器根本没被启动
+
+入口脚本一进来就会打印带时间戳的中文日志（数据目录自检、生成配置、启动命令…）。
+所以只要它**跑过**，`docker logs` 就一定有新行。**一行都没有 ⇒ 它没跑过 ⇒ 失败发生在
+compose / 守护进程层**——而那一层的错误**只打印到终端，不会进 `docker logs`**。
+这就是这类问题"事后无迹可寻"的根本原因，所以第一步永远是：**把 compose 的输出留下来**。
+
+#### 最常见的原因：容器当时已经在运行
+
+`docker compose up -d` 对一个**已经在跑**的容器是**空操作**，输出一行
+`Container ark-server Running` 就结束了 —— 一行新日志都不会有：
+
+```
+$ docker compose up -d
+ Container ark-server Running        ← 注意是 Running，不是 Started
+```
+
+于是 `docker logs` 理所当然没有新内容。而 `down`（或 `stop`）之后 `up` 会**重建/重启**容器，
+入口脚本重新跑一遍，日志自然就有了 —— 看起来就像"`down` 一下就好了"。
+
+> 判据：**看 compose 输出的是 `Running` 还是 `Started` / `Created`。**
+> `Running` = 没做任何事；`Started`/`Created` = 真的启动/重建了。
+
+#### 其他可能（都会让 compose 报错后中止，容器压根不会创建）
+
+| 原因 | compose 的典型报错 |
+| --- | --- |
+| 没 `cd` 到项目目录 | `no configuration file provided: not found` |
+| `--build` 时拉镜像失败（开机后代理/镜像站未就绪，见 [FAQ 22](#22-docker-compose-build--docker-pull-拉不到镜像wsl-里出网被重置)） | `failed to solve: ... connection reset by peer` |
+| 端口被别的程序占了 | `Bind for 0.0.0.0:7777 failed: port is already allocated` |
+| 网络地址池冲突 | `Pool overlaps with other one on this address space` |
+
+#### 用 `./start.sh` 代替裸 `up -d`（推荐）
+
+项目根目录的 `start.sh` 就是为这个问题写的：
+
+```bash
+./start.sh               # 启动；若服务端已在正常运行则直接返回，不做无谓重启
+./start.sh --force       # 强制重建
+./start.sh --build       # 需要重新构建镜像时用
+```
+
+它会：① 先记录启动前的容器状态（区分"本来就在跑"和"确实没起来"）；② 完整记录 compose 的
+输出与退出码；③ **等到服务端进程真的出现**为止（而不是只等容器 `Up`）；④ 起不来时自动
+dump 诊断信息并自动 `down + up` 重试一次。所有输出同时写进 `start-<时间戳>.log`。
+
+```bash
+# 只想快速确认"是不是本来就在跑"：
+docker ps -a --filter name=ark-server --format '{{.Names}} | {{.Status}}'
+docker exec ark-server pgrep -f '[S]hooterGameServer'   # 有输出 = 服务端进程在
+```
+
+> ⚠ **两个 `pgrep` 的坑（本项目都踩过）**
+> ① 不能用 `pgrep -x ShooterGameServer`：Linux 进程名（comm）最长 **15 字符**，
+> 实际名字是 `ShooterGameServ`，写全名永远匹配不到。
+> ② 用 `[S]hooterGameServer` 这种括号写法，避免匹配到 `pgrep` 自己
+> （`sh -c "pgrep -f ShooterGameServer"` 里的 shell 命令行也会被匹配到，
+> Dockerfile 的 healthcheck 当初就是这么假健康的）。
 
 ---
 
