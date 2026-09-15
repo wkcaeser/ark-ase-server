@@ -1721,14 +1721,20 @@ docker exec ark-server curl -sS -m 8 -o /dev/null -w 'http=%{http_code}\n' \
 **现象**：`docker compose up -d` 敲下去，然后 `docker logs ark-server` 看不到任何新内容；
 `docker compose down` 之后再 `up -d` 就好了。
 
-#### 先明确一点：「没有新日志」意味着容器根本没被启动
+#### 先分型：看 compose 输出的是 `Running` 还是 `Started`
 
 入口脚本一进来就会打印带时间戳的中文日志（数据目录自检、生成配置、启动命令…）。
-所以只要它**跑过**，`docker logs` 就一定有新行。**一行都没有 ⇒ 它没跑过 ⇒ 失败发生在
-compose / 守护进程层**——而那一层的错误**只打印到终端，不会进 `docker logs`**。
-这就是这类问题"事后无迹可寻"的根本原因，所以第一步永远是：**把 compose 的输出留下来**。
+所以只要它**跑过**，`docker logs` 就一定有新行。据此分两种截然不同的情况：
 
-#### 最常见的原因：容器当时已经在运行
+| compose 输出 | 含义 | 去哪看 |
+| --- | --- | --- |
+| `Container ark-server Running` | 容器本来就在跑，`up -d` 是**空操作** | 见下「原因 A」 |
+| `Container ark-server Started` | 容器**确实重新启动了**，入口脚本也确实跑了 | **看 [FAQ 25](#25-输出是-started-但-logs--f-还是看不到新日志--日志文件坏了)** |
+
+> ⚠ 早先这里写过「没有新日志 == 容器没被启动」，**这个判断是错的**：输出 `Started` 时
+> 容器是真的重启了，只是日志被写坏了。务必先看输出是 `Running` 还是 `Started` 再分型。
+
+#### 原因 A：容器当时已经在运行
 
 `docker compose up -d` 对一个**已经在跑**的容器是**空操作**，输出一行
 `Container ark-server Running` 就结束了 —— 一行新日志都不会有：
@@ -1779,6 +1785,97 @@ docker exec ark-server pgrep -f '[S]hooterGameServer'   # 有输出 = 服务端�
 > ② 用 `[S]hooterGameServer` 这种括号写法，避免匹配到 `pgrep` 自己
 > （`sh -c "pgrep -f ShooterGameServer"` 里的 shell 命令行也会被匹配到，
 > Dockerfile 的 healthcheck 当初就是这么假健康的）。
+
+---
+
+### 25. 输出是 `Started`，但 `logs -f` 还是看不到新日志 —— 日志文件坏了
+
+**现象**（本项目的真实案例）：
+
+```
+$ docker compose up -d
+ Container ark-server Started        ← 确实重启了，不是空操作
+$ docker compose logs -f
+（翻完一大段旧日志之后，再也没有任何新行）
+$ docker compose down && docker compose up -d     ← 这样就好了
+```
+
+既然是 `Started`，排除 FAQ 24 的原因 A。那 `down` 到底改变了什么？——它是**唯一会
+删掉容器 json 日志文件**的操作（`stop` / `restart` 都会保留）。所以矛头直指日志文件本身。
+
+#### 两个已被实测证实的机制
+
+**① `logs -f` 会从头回放全部历史**（实测：总 257 行，跟随 6 秒拿到的也是 257 行）
+
+```
+docker logs        = 257 行
+docker compose logs -f（6 秒）= 257 行     ← 从头开始，不是从「现在」开始
+docker logs -f --tail 0       = 0 行       ← 加了 --tail 0 才只跟新的
+```
+
+所以你每次都要先被灌一遍完整的历史（服务端跑得越久这段越长），新日志在最底下。
+**日常看日志请加 `--tail`**：
+
+```bash
+docker logs -f --tail 50 ark-server        # 推荐：只看最后 50 行，然后跟随
+docker compose logs -f --tail 50
+```
+
+**② 日志文件里一旦出现「解不出来的行」，`docker logs` 就永久停在那里**
+
+Docker 的 `json-file` 驱动是**顺序解析**的，遇到第一条无法解析的行就停止，之后的内容
+全部读不到。用对照实验验证（往日志里插一条含裸控制字符的坏行，再追加一条正常行）：
+
+```
+磁盘上确实有 3 条：FIRST_LINE / 坏行 / SECOND_LINE
+docker logs            → 只有 FIRST_LINE        ← 在坏行处停住
+docker logs --tail 3   → 空                     ← 连 tail 都拿不到
+docker logs -f         → 只有 FIRST_LINE，然后永远等待   ← 新行再也不会出现
+```
+
+**这就是「容器明明起来了，`logs -f` 却一行新日志都没有」的完整解释**——服务端其实是好的、
+甚至已经能进游戏了，只是你看不到它的输出。而 `down` 删掉了日志文件，重建后自然就恢复了。
+
+> 补充实测（避免误判）：**单纯"最后一行写成半截"不会破坏日志**，Docker 会忽略尾部不完整的行。
+> 真正致命的是**文件中间**出现含裸控制字符 / 断裂的行（异常断电、WSL 被强杀时的撕裂写入）。
+> 上一轮排查时在这台机器上确实观测到过容器内日志带 NUL 字节，与该机制吻合；
+> 但用户执行 `down` 后原始证据已被删除，**无法再回溯当时具体是哪次断电写坏的**。
+
+#### 现在会自动处理
+
+`./start.sh` 加了「日志流可读性」探针：容器在跑、但 `docker logs` 一行都读不出来时，
+判断为日志损坏，**自动 `--force-recreate` 重建容器**拿一份干净日志（存档和模组都在卷里，不丢）：
+
+```
+--- [3] 检查日志流是否可读 ---
+>> 容器在跑，但 docker logs 读不出任何一行 —— 日志文件被写坏了。
+   处理：重建容器以拿到一份干净的日志（存档与模组都在卷里，不会丢）。
+>> 已恢复：日志可读
+```
+
+探针刻意**不直接读** `/var/lib/docker/.../*-json.log`（属主 root，普通用户读不了），
+而是拿 `docker logs` 自己当探针，因此普通用户也能用。
+
+同时 `docker-compose.yml` 加了日志轮转，限制单文件大小与份数（默认 json-file 是**不限大小**的，
+ARK 又很能刷，几天就能涨到几百 MB，回放会明显变慢）：
+
+```yaml
+logging:
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+```
+
+> 改 `logging` 属于容器级配置，必须 `docker compose up -d --force-recreate` 才生效。
+
+#### 想自己确认
+
+```bash
+docker inspect ark-server --format '{{.HostConfig.LogConfig}}'
+docker logs --tail 3 ark-server | wc -l     # 容器在跑却是 0 → 日志坏了
+./start.sh --force                          # 重建容器即可恢复
+```
 
 ---
 
