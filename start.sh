@@ -86,6 +86,30 @@ log_stream_ok() {
   return 0
 }
 
+# 打印容器日志，并把 docker 的 UTC 时间戳前缀换算成本地时间。
+#
+# Docker 的 --timestamps 固定输出 UTC（RFC3339 带 Z），这是引擎行为、改不了，
+# 只能在显示时换算。否则日志里的 15:17 其实是本地 23:17 —— 差 8 小时，
+# 极易被误判成「这是上一次的旧日志」（本项目就因此绕了一圈）。
+# 容器内自己打印的时间戳（TZ=Asia/Shanghai）本来就是本地时间，不受影响。
+logs_local() {
+  docker logs --timestamps "$@" "$CONTAINER" 2>&1 | tr -d '\000' \
+  | while IFS= read -r line; do
+      ts="${line%% *}"
+      case "$ts" in
+        *Z)
+          ts_clean="$(printf '%s' "$ts" | sed 's/\.[0-9]*Z$/Z/')"
+          lt="$(TZ="${TZ_NAME:-Asia/Shanghai}" date -d "$ts_clean" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+          if [ -n "$lt" ]; then
+            printf '%s  %s\n' "$lt" "${line#* }"
+            continue
+          fi
+          ;;
+      esac
+      printf '%s\n' "$line"
+    done
+}
+
 dump_diag() {
   say ""
   say "----------------------------------------------------------"
@@ -94,8 +118,8 @@ dump_diag() {
   say "· 容器 State："
   docker inspect "$CONTAINER" --format \
     'Status={{.State.Status}} Running={{.State.Running}} ExitCode={{.State.ExitCode}} Error=[{{.State.Error}}]' 2>&1
-  say "· 容器日志尾部 30 行："
-  docker logs --tail 30 --timestamps "$CONTAINER" 2>&1 | tr -d '\000'
+  say "· 容器日志尾部 30 行（时间戳已换算为本地时间）："
+  logs_local --tail 30
   say "· dockerd 最近 3 分钟的报错："
   journalctl -u docker --since '-3min' --no-pager 2>&1 \
     | grep -iE 'error|fail|denied|refus|timeout|cannot|unable|conflict|already' | tail -20
@@ -186,7 +210,11 @@ rebuild() {
         say "日志已保存：$LOG"
         exit 0
       fi
-      say ">> 容器在跑，但里面没有 ARK 主进程（启动卡住 / 已崩溃）→ 需要重建"
+      if server_alive; then
+        say ">> 容器在跑，服务端进程也在（本次指定了重建参数，按你的要求重建）"
+      else
+        say ">> 容器在跑，但里面没有 ARK 主进程（启动卡住 / 已崩溃）→ 需要重建"
+      fi
       FORCE=1
     fi
   fi
@@ -214,11 +242,12 @@ rebuild() {
   #   ① wait_ready 第一轮就会 grep 到历史的 PID 行 → 秒返回「已出现」，
   #      即使本次其实卡在 Steam 下载也会误报成功；
   #   ② 最后打印的 tail 可能整屏都是上一次的内容，看着就像「日志是旧的」。
-  # 打印本次容器启动时刻，方便判断日志是不是新的。
-  # 注意 docker 的日志时间戳是 UTC：日志里的 15:17 对应本地 23:17（+8 小时）。
-  BOOT_AT="$(docker inspect -f '{{.State.StartedAt}}' "$CONTAINER" 2>/dev/null \
-             | sed 's/\.[0-9]*Z$/Z/')"
-  [ -n "$BOOT_AT" ] && say ">> 本次容器启动于 ${BOOT_AT}（UTC，本地时间 = 该值 +8 小时）"
+  # 打印本次容器启动时刻（换算成本地时间），方便判断日志是不是新的。
+  BOOT_AT="$(docker inspect -f '{{.State.StartedAt}}' "$CONTAINER" 2>/dev/null)"
+  if [ -n "$BOOT_AT" ]; then
+    BOOT_LOCAL="$(TZ="${TZ_NAME:-Asia/Shanghai}" date -d "$BOOT_AT" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+    say ">> 本次容器启动于 ${BOOT_LOCAL:-$BOOT_AT}（本地时间）"
+  fi
 
   say ""
   say "--- [3] 检查日志流是否可读 ---"
@@ -264,14 +293,14 @@ rebuild() {
   say ""
   say "--- [5] 结果 ---"
   docker ps --filter "name=^/${CONTAINER}$" --format '{{.Names}} | {{.Status}}'
-  say "· 服务端日志尾部（--tail 路径，能看到最新内容）："
-  say "  ⚠ 时间戳是 UTC：日志里的 15:17 就是本地 23:17（+8 小时），别误判成旧日志。"
-  say "  容器内打印的中文时间戳（如 [2026-09-17 23:17:56]）才是本地时间。"
-  docker logs --tail 12 --timestamps "$CONTAINER" 2>&1 | tr -d '\000'
+  say "· 服务端日志尾部（时间戳已换算为本地时间，与容器内中文时间戳一致）："
+  logs_local --tail 12
   say ""
   say "日志已保存：$LOG"
   say "实时看日志：docker logs -f --tail 50 $CONTAINER"
   say "   （⚠ 别用裸的 logs -f：它会从头回放全部历史，实测 257 行就全量重放一遍，"
   say "    服务端跑得越久这段越长，新日志被压在最底下——看起来就像「没有新日志」）"
+  say "   （⚠ --timestamps 打出来的是 UTC，比本地慢 8 小时；本脚本已自动换算，"
+  say "    你自己看时可以用： docker logs -f --tail 50 $CONTAINER | ts 或手动换算）"
   say "探活：      python3 tools/a2s-probe.py localhost:27015"
 } 2>&1 | tee "$LOG"

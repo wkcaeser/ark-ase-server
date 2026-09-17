@@ -118,6 +118,22 @@ services:
       - ${DATA_DIR:-./data}/backup:/backup
       # 自定义配置覆盖目录（只读挂载）
       - ./config:/etc/ark/config:ro
+      # ---------------------------------------------------------------------
+      # 时区：把宿主机的时区文件挂进来。
+      #
+      # ⚠ 只设上面的 TZ 环境变量【不够】。实测容器里两条路不一致：
+      #     TZ=Asia/Shanghai          → date / 读 TZ 的程序：+8 ✅
+      #     /etc/localtime -> Etc/UTC → 读 /etc/localtime 的程序：UTC ❌（差 8 小时）
+      #     /etc/timezone  = Etc/UTC  → 同上 ❌
+      #   debian:12-slim 基础镜像默认就是 Etc/UTC，TZ 变量并不会改写这两个文件。
+      #   挂载后两条路都是 Asia/Shanghai。
+      #
+      # ⚠ 这两个路径是 WSL/Linux 宿主机的，Windows 下用 Docker Desktop 且
+      #   Docker VM 里没有这两个文件时，挂载会变成空目录、反而更糟 —— 那种环境下
+      #   请在 Dockerfile 里装 tzdata 并 `ln -sf /usr/share/zoneinfo/$TZ /etc/localtime`。
+      #   本项目跑在 WSL 原生 dockerd 上，宿主机两个文件都在（已验证）。
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     ulimits:
       nofile:
         soft: 100000

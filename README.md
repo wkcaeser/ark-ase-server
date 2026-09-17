@@ -1910,8 +1910,72 @@ logging:
 
 ```bash
 docker inspect ark-server --format '{{.HostConfig.LogConfig}}'
-docker logs --tail 3 ark-server | wc -l     # 容器在跑却是 0 → 日志坏了
-./start.sh --force                          # 重建容器即可恢复
+
+# 判断日志坏没坏：对比「全量读到的最后一行」和「--tail 读到的最后一行」
+# 全量读到的更旧 ⇒ 中间有坏行（只看 --tail 会漏检，见上面机制 ③）
+tail_last="$(docker logs --timestamps --tail 1 ark-server | tr -d '\000' | tail -1)"
+full_last="$(docker logs --timestamps ark-server | tr -d '\000' | tail -1)"
+echo "尾部路径: $tail_last"
+echo "全量路径: $full_last"      # 两个不一样就是坏了
+
+./start.sh --force               # 重建容器即可恢复
+```
+
+---
+
+### 26. 日志时间 / 时区：为什么日志里的时间和本地差 8 小时
+
+这个问题有**两层**，都会让人误判"日志是旧的"：
+
+#### 第一层：`docker logs --timestamps` 打的是 UTC（引擎行为，改不了）
+
+```
+2026-09-17T15:17:57.425443528Z  Setting breakpad minidump AppID = 346110
+                ↑ 结尾的 Z 表示 UTC，这一行其实是本地 23:17:57
+```
+
+`docker logs --timestamps` 固定输出 RFC3339 的 UTC 时间，Docker 没有"按本地时区输出"的开关。
+所以 15:17 不是"上一次的日志"，就是刚刚写的 —— 正好差 8 小时，很容易看错。
+
+`./start.sh` 已经自动把时间戳换算成本地时间再打印；你自己临时看时可以用：
+
+```bash
+docker logs --tail 50 ark-server --timestamps \
+  | while read -r ts rest; do echo "$(TZ=Asia/Shanghai date -d "${ts%%.*}Z" '+%F %T') $rest"; done
+```
+
+容器内自己打印的时间戳（如 `[2026-09-17 23:17:56][信息]`）本来就是本地时间，不受影响。
+
+#### 第二层：容器里 `TZ` 变量生效了，但 `/etc/localtime` 没跟上（这个是配置问题，已修）
+
+`debian:12-slim` 基础镜像默认是 `Etc/UTC`，**只设 `TZ` 环境变量并不会改写这两个文件**，
+于是容器内出现两条不一致的路：
+
+| 读取来源 | 修之前 | 影响 |
+|---|---|---|
+| `TZ` 环境变量 | `Asia/Shanghai` ✅ | `date` 命令、读 `TZ` 的程序正确 |
+| `/etc/localtime` | → `Etc/UTC` ❌ | 不读 `TZ` 的程序按 UTC 算，**差 8 小时** |
+| `/etc/timezone` | `Etc/UTC` ❌ | 同上 |
+
+`docker-compose.yml` 里已把宿主机的时区文件只读挂进容器，两条路现在都是 `Asia/Shanghai`：
+
+```yaml
+volumes:
+  - /etc/localtime:/etc/localtime:ro
+  - /etc/timezone:/etc/timezone:ro
+```
+
+> 挂了这两个文件属于容器级配置，改动后要 `docker compose up -d --force-recreate` 才生效。
+> ⚠ 这两个路径是 WSL/Linux 宿主机的。若用 Windows Docker Desktop 且其 VM 里没有这两个文件，
+> 挂载会变成空目录反而更糟 —— 那种环境请改在 Dockerfile 里装 `tzdata` 并
+> `ln -sf /usr/share/zoneinfo/$TZ /etc/localtime`。
+
+#### 自己确认
+
+```bash
+docker exec ark-server date                     # 应为 CST，且与宿主机一致
+docker exec ark-server ls -l /etc/localtime     # 应指向 .../Asia/Shanghai，不是 Etc/UTC
+docker exec ark-server cat /etc/timezone        # Asia/Shanghai
 ```
 
 ---
