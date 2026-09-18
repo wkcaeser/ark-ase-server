@@ -303,4 +303,5 @@ rebuild() {
   say "   （⚠ --timestamps 打出来的是 UTC，比本地慢 8 小时；本脚本已自动换算，"
   say "    你自己看时可以用： docker logs -f --tail 50 $CONTAINER | ts 或手动换算）"
   say "探活：      python3 tools/a2s-probe.py localhost:27015"
+  say "停止服务端：./stop.sh   （优雅保存世界；关机 / 休眠前务必先执行）"
 } 2>&1 | tee "$LOG"

@@ -439,8 +439,14 @@ CONFIG_REGENERATE=false
 
 ```bash
 # 启动 / 停止 / 重启（重启 = 触发一次模组与服务端更新检查）
+# 推荐用项目自带脚本 —— 它们带取证、等待与自动重试：
+./start.sh               # 启动（若已在正常运行则直接返回，不做无谓重启）
+./stop.sh                # 优雅停止（保存世界，默认最多等 180 秒）
+./stop.sh --down         # 停止并删除容器（会一并重置 json 日志）
+
+# 等价的裸命令（清楚自己在做什么时再用）：
 docker compose up -d
-docker compose stop
+docker compose stop -t 180    # ⚠ 别漏 -t：默认只等 10 秒就 SIGKILL，世界可能没存完
 docker compose restart
 
 # 实时看日志（Ctrl+C 只退出查看，不会停服务器）
@@ -469,6 +475,31 @@ docker compose run --rm ark render
 # 查看当前服务端版本（buildid）
 docker compose run --rm ark version
 ```
+
+### 关闭服务器
+
+```bash
+./stop.sh          # 推荐：优雅停止，服务端会把世界写盘后再退出
+```
+
+三种"停"的区别，别用错：
+
+| 命令 | 实际发生了什么 | 什么时候用 |
+|---|---|---|
+| `./stop.sh`<br>（= `docker compose stop -t 180`） | 发 SIGTERM → 容器内转成 SIGINT → 服务端**保存世界**再退出；**保留容器与日志** | 日常关服、**关机/休眠前** |
+| `./stop.sh --down` | 停止并**删除容器**（连 json 日志一起删掉）。存档在 `${DATA_DIR}/server` 卷里，不受影响 | 日志读不到时重置；彻底清理 |
+| `docker kill` / 直接关机 | **不给保存机会**：最近的进度丢失，且等同硬断电 | ❌ 不要用 |
+
+时间关系（都留了余量）：
+
+```
+./stop.sh -t 180   >   stop_grace_period 150s   >   容器内 STOP_TIMEOUT 90s
+   Docker 最多等          Docker 最多等              容器内最多等
+   180 秒才 SIGKILL       150 秒才 SIGKILL           90 秒保存世界
+```
+
+> ⚠ **关机 / 休眠前务必先跑 `./stop.sh`**。直接关机不只是丢进度 —— 它和硬断电一样会把
+> json 日志撕裂出坏行，之后 `docker logs` 就再也读不到新内容了（见 FAQ 25）。
 
 ### 备份与恢复
 
